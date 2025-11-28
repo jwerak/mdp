@@ -1,0 +1,9 @@
+{
+    "version": 0,
+    "tools": {
+        "demos": {
+            "label": "Demo Deployments",
+            "path": "mdp.html"
+        }
+    }
+}
