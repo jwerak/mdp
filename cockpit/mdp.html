@@ -4,17 +4,6 @@
     <title>Demo Deployments</title>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <script>
-        // Set webpack public path BEFORE any scripts load
-        // This ensures chunks (JS and CSS) load correctly in Cockpit's routing system
-        (function() {
-            var basePath = window.location.pathname.substring(0, window.location.pathname.lastIndexOf('/') + 1);
-            var publicPath = basePath + 'dist/';
-            if (typeof __webpack_public_path__ === 'undefined') {
-                __webpack_public_path__ = publicPath;
-            }
-        })();
-    </script>
     <link rel="stylesheet" href="dist/mdp.css">
     <script src="../base1/cockpit.js"></script>
 </head>

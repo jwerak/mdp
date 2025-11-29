@@ -63,7 +63,7 @@ export const App: React.FC = () => {
   const [settingsOpen, setSettingsOpen] = useState(false);
 
   return (
-    <Page>
+    <Page className="pf-m-no-sidebar">
       <PageSection type={PageSectionTypes.default} variant="secondary">
         <Flex justifyContent={{ default: 'justifyContentSpaceBetween' }} alignItems={{ default: 'alignItemsCenter' }}>
           <FlexItem>
