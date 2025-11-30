@@ -1,24 +1,29 @@
-import React, { useState, useEffect } from 'react';
 import {
-  Card,
-  CardBody,
-  Title,
-  List,
-  ListItem,
-  EmptyState,
-  EmptyStateBody,
-  Spinner,
   Alert,
   Bullseye,
-  Icon
+  Button,
+  Card,
+  CardBody,
+  EmptyState,
+  EmptyStateBody,
+  Icon,
+  List,
+  ListItem,
+  Spinner,
+  Title
 } from '@patternfly/react-core';
-import { PlusCircleIcon } from '@patternfly/react-icons';
+import { CogIcon, PlusCircleIcon } from '@patternfly/react-icons';
+import React, { useEffect, useState } from 'react';
 import { getDemos } from '../lib/catalog';
 import { loadConfig } from '../lib/config';
 import { DemoDefinition } from '../lib/types';
 import { LaunchModal } from './LaunchModal';
 
-export const DemoList: React.FC = () => {
+interface DemoListProps {
+  onConfigureCatalog?: () => void;
+}
+
+export const DemoList: React.FC<DemoListProps> = ({ onConfigureCatalog }) => {
   const [demos, setDemos] = useState<DemoDefinition[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -34,7 +39,7 @@ export const DemoList: React.FC = () => {
     try {
       const config = await loadConfig();
       if (!config.repoUrl || !config.collectionName) {
-        setError('Please configure catalog settings first');
+        setError('not_configured');
         setLoading(false);
         return;
       }
@@ -66,7 +71,29 @@ export const DemoList: React.FC = () => {
           <Title headingLevel="h2" size="lg" style={{ marginBottom: '1rem' }}>
             Available Demos
           </Title>
-          {error ? (
+          {error === 'not_configured' ? (
+            <EmptyState>
+              <Icon size="lg">
+                <CogIcon />
+              </Icon>
+              <Title headingLevel="h3" size="md">
+                Catalog not configured
+              </Title>
+              <EmptyStateBody>
+                Configure the catalog settings to load available demos.
+              </EmptyStateBody>
+              {onConfigureCatalog && (
+                <Button
+                  variant="primary"
+                  icon={<CogIcon />}
+                  onClick={onConfigureCatalog}
+                  style={{ marginTop: '1rem' }}
+                >
+                  Configure Catalog
+                </Button>
+              )}
+            </EmptyState>
+          ) : error ? (
             <Alert variant="warning" title={error} isInline />
           ) : demos.length === 0 ? (
             <EmptyState>

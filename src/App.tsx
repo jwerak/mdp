@@ -1,19 +1,19 @@
-import React, { useState, Suspense, lazy, Component, ErrorInfo, ReactNode } from 'react';
 import {
+  Alert,
+  Bullseye,
+  Button,
+  Flex,
+  FlexItem,
   Page,
   PageSection,
   PageSectionTypes,
   Spinner,
-  Bullseye,
-  Alert,
-  Title,
-  Button,
-  Flex,
-  FlexItem,
   Split,
-  SplitItem
+  SplitItem,
+  Title
 } from '@patternfly/react-core';
 import { CogIcon } from '@patternfly/react-icons';
+import React, { Component, ErrorInfo, ReactNode, Suspense, lazy, useState } from 'react';
 
 const DemoList = lazy(() => import('./components/DemoList').then(module => ({ default: module.DemoList })));
 const InstanceList = lazy(() => import('./components/InstanceList').then(module => ({ default: module.InstanceList })));
@@ -85,7 +85,7 @@ export const App: React.FC = () => {
           <Suspense fallback={<LoadingFallback />}>
             <Split hasGutter>
               <SplitItem isFilled={false} style={{ width: '300px', minWidth: '300px' }}>
-                <DemoList />
+                <DemoList onConfigureCatalog={() => setSettingsOpen(true)} />
               </SplitItem>
               <SplitItem isFilled>
                 <InstanceList />
