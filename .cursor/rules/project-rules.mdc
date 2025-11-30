@@ -1,0 +1,66 @@
+Act as a Senior Linux Systems Developer and React Expert. I need you to scaffold a **Cockpit Project Plugin** to manage "Demo Deployments."
+
+**Context:**
+- **Goal:** Users deploy demos defined in a remote Git repository.
+- **The Repository:** Is a valid **Ansible Collection**. It contains a special `demos.yaml` file in its root describing the available demos and their input parameters.
+- **Persistence:** Filesystem-based (Split-File pattern) in `/var/lib/cockpit-plugin-demos/`.
+- **Execution:** Ansible playbooks are executed via `ansible-navigator` triggered by `systemd-run`. The command output is displayed in the web UI.
+- **Execution Environment:** Configuration must be provided to define the execution environment (EE) used by `ansible-navigator`.
+
+**Security:**
+- Plugin runs as a standard user (member of `cockpit-demo-ops` group).
+- NO `sudo` in code.
+
+**Directory Structure (CRITICAL):**
+To ensure the Ansible Runner can use the cloned repo as a Collection, the plugin must maintain this Host structure:
+`/var/lib/cockpit-plugin-demos/`
+  ├── catalog/
+  │   └── ansible_collections/
+  │       └── <namespace>/      <-- Inferred from user input or default to 'local'
+  │           └── <collection>/ <-- The Git Clone target
+  │               ├── galaxy.yml
+  │               ├── demos.yaml
+  │               └── playbooks/
+  └── instances/
+      └── <instance-id>/
+          ├── spec.json
+          └── status.json
+
+**Requirements:**
+
+1.  **Data Models (`src/lib/types.ts`):**
+    - `DemoParameter`: { name: string, label: string, type: 'text' | 'number' | 'boolean' | 'select', options?: string[], default?: any }
+    - `DemoDefinition`: { id: string, name: string, playbook: string, parameters: DemoParameter[] }
+    - `CatalogConfig`: { repoUrl: string, namespace: string, collectionName: string, executionEnvironment?: string }
+
+2.  **Catalog Service (`src/lib/catalog.ts`):**
+    - `syncCatalog(config)`:
+      - Uses `cockpit.spawn` to `git clone` (or `git pull`) into the correct nested path: `catalog/ansible_collections/{namespace}/{collectionName}`.
+    - `getDemos()`:
+      - Reads `demos.yaml` from the cloned repo.
+      - Returns `DemoDefinition[]`.
+
+3.  **Instance Service (`src/lib/instances.ts`):**
+    - `createInstance(demoId, formData)`:
+      - Generates ID.
+      - Writes `spec.json` to `instances/<id>/`.
+      - **Important:** `spec.json` must include the `playbook_path` derived from the catalog so the Automation knows what to run.
+    - `executeInstance(instanceId, executionEnvironment)`:
+      - Triggers `ansible-navigator` via `systemd-run` using the configured execution environment.
+      - Captures and streams command output to the web UI.
+
+4.  **UI Components (PatternFly):**
+    - **Settings:** Form to configure Git Repo URL, Namespace, Collection Name, and Execution Environment.
+    - **Catalog Grid:** Cards displaying available demos from `demos.yaml`.
+    - **Dynamic Launch Modal:**
+      - Takes a `DemoDefinition`.
+      - **Dynamically renders inputs** based on `parameters` array.
+      - Use `react-hook-form` or controlled state to capture values.
+    - **Instance List:** Polling `status.json` for deployment updates.
+
+**Constraints:**
+- Use `cockpit.spawn` for Git operations.
+- Handle missing `demos.yaml` gracefully (show "Invalid Catalog" error).
+- Ensure file paths used in `cockpit.file` are constructed safely.
+
+Please generate the file structure, the TypeScript interfaces, and the logic for the **Catalog Service** and the **Dynamic Form Component**.

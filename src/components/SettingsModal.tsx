@@ -1,18 +1,17 @@
-import React, { useState, useEffect } from 'react';
 import {
-  Modal,
-  ModalVariant,
-  ModalBody,
-  ModalFooter,
+  Alert,
   Button,
   Form,
   FormGroup,
-  TextInput,
-  ActionGroup,
-  Alert
+  Modal,
+  ModalBody,
+  ModalFooter,
+  ModalVariant,
+  TextInput
 } from '@patternfly/react-core';
-import { loadConfig, saveConfig } from '../lib/config';
+import React, { useEffect, useState } from 'react';
 import { syncCatalog } from '../lib/catalog';
+import { loadConfig, saveConfig } from '../lib/config';
 import { CatalogConfig } from '../lib/types';
 
 interface SettingsModalProps {
@@ -24,7 +23,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose })
   const [config, setConfig] = useState<CatalogConfig>({
     repoUrl: '',
     namespace: 'local',
-    collectionName: ''
+    collectionName: '',
+    executionEnvironment: ''
   });
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState<{ type: 'success' | 'danger'; text: string } | null>(null);
@@ -64,15 +64,16 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose })
       onClose={onClose}
     >
       <ModalBody>
-        {message && (
-          <Alert
-            variant={message.type === 'success' ? 'success' : 'danger'}
-            title={message.text}
-            isInline
-            style={{ marginBottom: '1rem' }}
-          />
-        )}
-        <Form onSubmit={handleSubmit}>
+        <div style={{ overflowY: 'auto', maxHeight: 'calc(100vh - 250px)' }}>
+          {message && (
+            <Alert
+              variant={message.type === 'success' ? 'success' : 'danger'}
+              title={message.text}
+              isInline
+              style={{ marginBottom: '1rem' }}
+            />
+          )}
+          <Form onSubmit={handleSubmit}>
           <FormGroup label="Git Repository URL" isRequired fieldId="repoUrl">
             <TextInput
               id="repoUrl"
@@ -97,7 +98,19 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose })
               isRequired
             />
           </FormGroup>
+          <FormGroup label="Execution Environment" fieldId="executionEnvironment">
+            <TextInput
+              id="executionEnvironment"
+              value={config.executionEnvironment || ''}
+              onChange={(_, value) => setConfig({ ...config, executionEnvironment: value })}
+              placeholder="quay.io/ansible/ansible-navigator:latest"
+            />
+            <div style={{ fontSize: '0.875rem', color: 'var(--pf-v6-global--Color--200)', marginTop: '0.25rem' }}>
+              Container image name for ansible-navigator execution environment
+            </div>
+          </FormGroup>
         </Form>
+        </div>
       </ModalBody>
       <ModalFooter>
         <Button

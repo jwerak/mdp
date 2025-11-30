@@ -30,7 +30,10 @@ module.exports = {
     })
   ],
   resolve: {
-    extensions: ['.ts', '.tsx', '.js', '.jsx']
+    extensions: ['.ts', '.tsx', '.js', '.jsx'],
+    alias: {
+      'cockpit-dark-theme': path.resolve(__dirname, 'src/cockpit-dark-theme.ts')
+    }
   },
   module: {
     rules: [

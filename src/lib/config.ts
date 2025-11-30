@@ -18,11 +18,12 @@ const CONFIG_PATH = '/var/lib/cockpit-plugin-demos/config.json';
 const DEFAULT_CONFIG: CatalogConfig = {
   repoUrl: '',
   namespace: 'local',
-  collectionName: ''
+  collectionName: '',
+  executionEnvironment: ''
 };
 
 export async function loadConfig(): Promise<CatalogConfig> {
-  return new Promise((resolve, reject) => {
+  return new Promise((resolve) => {
     getCockpit().file(CONFIG_PATH).read()
       .then((content: string) => {
         try {

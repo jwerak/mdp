@@ -1,31 +1,31 @@
-import React, { useState, useEffect } from 'react';
 import {
+  Alert,
+  Badge,
+  Bullseye,
   Card,
   CardBody,
-  Title,
-  Spinner,
-  Alert,
+  Dropdown,
+  DropdownItem,
+  DropdownList,
   EmptyState,
   EmptyStateBody,
-  Bullseye,
-  Dropdown,
-  DropdownList,
-  DropdownItem,
+  Icon,
   MenuToggle,
   MenuToggleElement,
-  Badge,
-  Icon
+  Spinner,
+  Title
 } from '@patternfly/react-core';
+import { EllipsisVIcon, SearchIcon } from '@patternfly/react-icons';
 import {
   Table,
-  Thead,
-  Tr,
-  Th,
   Tbody,
-  Td
+  Td,
+  Th,
+  Thead,
+  Tr
 } from '@patternfly/react-table';
-import { SearchIcon, EllipsisVIcon } from '@patternfly/react-icons';
-import { getAllInstances, deleteInstance, reapplyInstance } from '../lib/instances';
+import React, { useEffect, useState } from 'react';
+import { deleteInstance, executeInstance, getAllInstances, reapplyInstance } from '../lib/instances';
 import { Instance } from '../lib/types';
 import { InstanceDetailModal } from './InstanceDetailModal';
 
@@ -83,6 +83,18 @@ export const InstanceList: React.FC = () => {
       await loadInstances();
     } catch (err: any) {
       alert(`Failed to reapply instance: ${err.message}`);
+    }
+    setActionDropdownOpen({ ...actionDropdownOpen, [instanceId]: false });
+  };
+
+  const handleExecute = async (instanceId: string) => {
+    try {
+      await executeInstance(instanceId, (output) => {
+        console.log('Execution output:', output);
+      });
+      await loadInstances();
+    } catch (err: any) {
+      alert(`Failed to execute instance: ${err.message}`);
     }
     setActionDropdownOpen({ ...actionDropdownOpen, [instanceId]: false });
   };
@@ -193,6 +205,9 @@ export const InstanceList: React.FC = () => {
                         <DropdownList>
                           <DropdownItem onClick={() => handleShowDetails(instance)}>
                             Show details
+                          </DropdownItem>
+                          <DropdownItem onClick={() => handleExecute(instance.id)}>
+                            Execute
                           </DropdownItem>
                           <DropdownItem onClick={() => handleReapply(instance.id)}>
                             Re-apply

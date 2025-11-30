@@ -1,5 +1,6 @@
-import { InstanceSpec, InstanceStatus, Instance, DemoDefinition, CatalogConfig } from './types';
 import { getPlaybookPath } from './catalog';
+import { loadConfig } from './config';
+import { CatalogConfig, DemoDefinition, Instance, InstanceSpec, InstanceStatus } from './types';
 
 declare global {
   interface Window {
@@ -91,7 +92,7 @@ export async function getInstance(instanceId: string): Promise<Instance> {
 }
 
 export async function getAllInstances(): Promise<Instance[]> {
-  return new Promise((resolve, reject) => {
+  return new Promise((resolve) => {
     const cockpit = getCockpit();
 
     // Ensure the directory exists first
@@ -156,7 +157,6 @@ export async function deleteInstance(instanceId: string): Promise<void> {
 }
 
 export async function reapplyInstance(instanceId: string): Promise<void> {
-  const instance = await getInstance(instanceId);
   const statusPath = `${INSTANCES_PATH}/${instanceId}/status.json`;
 
   const newStatus: InstanceStatus = {
@@ -172,6 +172,110 @@ export async function reapplyInstance(instanceId: string): Promise<void> {
         console.error('Failed to reapply instance:', error);
         reject(new Error(`Failed to reapply instance: ${error.message}`));
       });
+  });
+}
+
+export async function executeInstance(
+  instanceId: string,
+  onOutput?: (output: string) => void
+): Promise<void> {
+  const instance = await getInstance(instanceId);
+  const config = await loadConfig();
+  const statusPath = `${INSTANCES_PATH}/${instanceId}/status.json`;
+
+  if (!config.executionEnvironment) {
+    throw new Error('Execution environment is not configured. Please configure it in settings.');
+  }
+
+  const cockpit = getCockpit();
+  let outputBuffer = '';
+
+  const updateStatus = async (updates: Partial<InstanceStatus>) => {
+    const currentStatus = instance.status;
+    const newStatus: InstanceStatus = {
+      ...currentStatus,
+      ...updates
+    };
+    return cockpit.file(statusPath).replace(JSON.stringify(newStatus, null, 2));
+  };
+
+  await updateStatus({
+    state: 'running',
+    startedAt: new Date().toISOString(),
+    output: ''
+  });
+
+  const playbookPath = instance.spec.playbook_path;
+  const extraVars = JSON.stringify(instance.spec.parameters);
+
+  const ansibleNavigatorArgs = [
+    'ansible-navigator',
+    'run',
+    playbookPath,
+    '--eei', config.executionEnvironment,
+    '--extra-vars', extraVars,
+    '--mode', 'stdout'
+  ];
+
+  const systemdRunArgs = [
+    'systemd-run',
+    '--user',
+    '--unit', `cockpit-demo-${instanceId}`,
+    '--collect',
+    '--wait',
+    '--',
+    ...ansibleNavigatorArgs
+  ];
+
+  return new Promise((resolve, reject) => {
+    const process = cockpit.spawn(systemdRunArgs, {
+      err: 'out'
+    });
+
+    process.stream((data: string) => {
+      outputBuffer += data;
+      if (onOutput) {
+        onOutput(data);
+      }
+    });
+
+    process.done((exitCode: number) => {
+      const finalStatus: Partial<InstanceStatus> = {
+        output: outputBuffer,
+        completedAt: new Date().toISOString()
+      };
+
+      if (exitCode === 0) {
+        finalStatus.state = 'completed';
+        finalStatus.message = 'Playbook execution completed successfully';
+      } else {
+        finalStatus.state = 'failed';
+        finalStatus.error = `Playbook execution failed with exit code ${exitCode}`;
+      }
+
+      updateStatus(finalStatus)
+        .then(() => {
+          if (exitCode === 0) {
+            resolve();
+          } else {
+            reject(new Error(finalStatus.error || 'Execution failed'));
+          }
+        })
+        .catch((error: any) => {
+          console.error('Failed to update status:', error);
+          reject(error);
+        });
+    });
+
+    process.fail((error: any) => {
+      updateStatus({
+        state: 'failed',
+        error: error.message || 'Failed to start execution',
+        output: outputBuffer,
+        completedAt: new Date().toISOString()
+      }).catch(() => { });
+      reject(error);
+    });
   });
 }
 

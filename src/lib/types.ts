@@ -17,6 +17,7 @@ export interface CatalogConfig {
   repoUrl: string;
   namespace: string;
   collectionName: string;
+  executionEnvironment?: string;
 }
 
 export interface InstanceSpec {
@@ -33,6 +34,7 @@ export interface InstanceStatus {
   startedAt?: string;
   completedAt?: string;
   error?: string;
+  output?: string;
 }
 
 export interface Instance {
