@@ -1,0 +1,83 @@
+---
+- name: Execute Demo
+  hosts: localhost
+  gather_facts: false
+  vars:
+    instance_id: "{{ instance_id }}"
+    demo_type: "{{ demo_type }}"
+    demo_path: "{{ demo_path }}"
+    demo_vars: "{{ demo_vars | default({}) }}"
+    variable_definitions: "{{ variable_definitions | default([]) }}"
+    status_file: "/var/lib/cockpit-plugin-demos/instances/{{ instance_id }}/status.json"
+    collected_info: []
+
+  tasks:
+    - name: Validate required variables are defined
+      ansible.builtin.assert:
+        that:
+          - item.name in demo_vars or (item.required | default(false) == false)
+        fail_msg: "Required variable '{{ item.name }}' is not defined"
+        success_msg: "Variable '{{ item.name }}' is defined"
+      loop: "{{ variable_definitions }}"
+      when: item.required | default(false) | bool
+
+    - name: Validate variable types
+      ansible.builtin.assert:
+        that:
+          - (item.type == 'text' and demo_vars[item.name] | default('') is string) or
+            (item.type == 'number' and demo_vars[item.name] | default(0) | int == demo_vars[item.name] | default(0)) or
+            (item.type == 'boolean' and demo_vars[item.name] | default(false) is boolean) or
+            (item.type == 'select' and demo_vars[item.name] in (item.options | default([])))
+        fail_msg: "Variable '{{ item.name }}' has incorrect type. Expected {{ item.type }}"
+        success_msg: "Variable '{{ item.name }}' type is correct"
+      loop: "{{ variable_definitions }}"
+      when: item.name in demo_vars
+
+    - name: Include playbook
+      ansible.builtin.include_playbook: "{{ demo_path }}"
+      vars: "{{ demo_vars }}"
+      when: demo_type == 'playbook'
+
+    - name: Include role
+      ansible.builtin.include_role:
+        name: "{{ demo_path }}"
+      vars: "{{ demo_vars }}"
+      when: demo_type == 'role'
+
+    - name: Collect variable information for summary
+      ansible.builtin.set_fact:
+        collected_info: "{{ collected_info + [{
+          'name': item.name,
+          'description': item.description | default(''),
+          'value': demo_vars[item.name] | default('N/A') | string
+        }] }}"
+      loop: "{{ variable_definitions }}"
+
+    - name: Display summary and save status
+      ansible.builtin.debug:
+        msg: "{{ summary_msg.split('\n') }}"
+      vars:
+        summary_msg: |
+          ========================================
+          Playbook Execution Summary
+          ========================================
+          {% for item in collected_info %}
+          {{ item.description }}
+            Name:  {{ item.name }}
+            Value: {{ item.value }}
+          {% endfor %}
+          ========================================
+      register: summary_output
+
+    - name: Write status to file
+      ansible.builtin.copy:
+        content: "{{ {
+          'state': 'completed',
+          'message': 'Execution completed successfully',
+          'completedAt': ansible_date_time.iso8601,
+          'summary': {
+            'collected_info': collected_info
+          }
+        } | to_json }}"
+        dest: "{{ status_file }}"
+
