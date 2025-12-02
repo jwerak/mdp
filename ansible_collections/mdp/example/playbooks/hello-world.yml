@@ -1,0 +1,47 @@
+---
+- name: Hello World Playbook
+  hosts: localhost
+  gather_facts: true
+  vars:
+    greeting: "{{ greeting | default('Hello, World!') }}"
+    count: "{{ count | default(1) }}"
+    uppercase: "{{ uppercase | default(false) }}"
+    language: "{{ language | default('english') }}"
+
+  tasks:
+    - name: Display all input variables
+      ansible.builtin.debug:
+        msg: "{{ item }}"
+      loop:
+        - "=== Input Variables ==="
+        - "Greeting: {{ greeting }}"
+        - "Count: {{ count }}"
+        - "Uppercase: {{ uppercase }}"
+        - "Language: {{ language }}"
+
+    - name: Transform variables
+      ansible.builtin.set_fact:
+        transformed_vars:
+          greeting_upper: "{{ greeting | upper }}"
+          greeting_lower: "{{ greeting | lower }}"
+          count_squared: "{{ (count | int) * (count | int) }}"
+          language_code: "{{ language[:2] | upper }}"
+          greeting_length: "{{ greeting | length }}"
+
+    - name: Display transformed variables
+      ansible.builtin.debug:
+        msg: "{{ item }}"
+      loop:
+        - "=== Transformed Variables ==="
+        - "Greeting (Uppercase): {{ transformed_vars.greeting_upper }}"
+        - "Greeting (Lowercase): {{ transformed_vars.greeting_lower }}"
+        - "Count Squared: {{ transformed_vars.count_squared }}"
+        - "Language Code: {{ transformed_vars.language_code }}"
+        - "Greeting Length: {{ transformed_vars.greeting_length }}"
+
+    - name: Store transformed variables for meta playbook
+      ansible.builtin.set_fact:
+        transformed_greeting: "{{ transformed_vars.greeting_upper if uppercase else greeting }}"
+        transformed_count: "{{ transformed_vars.count_squared }}"
+        transformed_language: "{{ transformed_vars.language_code }}"
+        transformed_uppercase: "{{ uppercase | string }}"

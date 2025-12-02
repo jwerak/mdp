@@ -1,0 +1,58 @@
+---
+- name: Display greeting variables
+  ansible.builtin.debug:
+    msg: "{{ item }}"
+  loop:
+    - "Greeting: {{ greeting }}"
+    - "Count: {{ count }}"
+    - "Uppercase: {{ uppercase }}"
+    - "Language: {{ language }}"
+
+- name: Transform greeting based on language
+  ansible.builtin.set_fact:
+    transformed_greeting: "{{ language_translations[language] | default(greeting) }}"
+
+- name: Transform greeting to uppercase if requested
+  ansible.builtin.set_fact:
+    transformed_greeting: "{{ transformed_greeting | upper }}"
+  when: uppercase | bool
+
+- name: Display transformed variables
+  ansible.builtin.debug:
+    msg: "{{ item }}"
+  loop:
+    - "Transformed Greeting: {{ transformed_greeting }}"
+    - "Original Greeting: {{ greeting }}"
+    - "Language Used: {{ language }}"
+    - "Uppercase Applied: {{ uppercase }}"
+
+- name: Repeat greeting based on count
+  ansible.builtin.debug:
+    msg: "{{ transformed_greeting }} - Message {{ item }} of {{ count }}"
+  loop: "{{ range(1, count | int + 1) | list }}"
+  when: count | int > 0
+
+- name: Set transformed variables for status
+  ansible.builtin.set_fact:
+    status_variables:
+      transformed_greeting: "{{ transformed_greeting }}"
+      original_greeting: "{{ greeting }}"
+      language_used: "{{ language }}"
+      uppercase_applied: "{{ uppercase }}"
+      message_count: "{{ count }}"
+      timestamp: "{{ ansible_date_time.iso8601 }}"
+
+- name: Display final status summary
+  ansible.builtin.debug:
+    msg: |
+      ========================================
+      Hello World Demo - Execution Summary
+      ========================================
+      Transformed Greeting: {{ transformed_greeting }}
+      Original Greeting: {{ greeting }}
+      Language: {{ language }}
+      Uppercase Applied: {{ uppercase }}
+      Count: {{ count }}
+      Timestamp: {{ ansible_date_time.iso8601 }}
+      ========================================
+

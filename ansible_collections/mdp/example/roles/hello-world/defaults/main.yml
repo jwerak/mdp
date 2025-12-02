@@ -1,0 +1,25 @@
+---
+# Default variables for hello-world role
+greeting: "Hello, World!"
+greeting_label: "Greeting Message"
+greeting_description: "The greeting message to display"
+
+count: 1
+count_label: "Count"
+count_description: "Number of times to repeat the greeting"
+
+uppercase: false
+uppercase_label: "Uppercase Output"
+uppercase_description: "Whether to display output in uppercase"
+
+language: english
+language_label: "Language"
+language_description: "Language for the greeting"
+
+# Language translations
+language_translations:
+  english: "Hello"
+  spanish: "Hola"
+  french: "Bonjour"
+  german: "Hallo"
+

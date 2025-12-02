@@ -1,0 +1,37 @@
+demos:
+  - id: hello-world
+    name: Hello World Demo
+    description: A simple demo that prints variables and saves status with transformed values
+    type: role
+    path: hello-world
+    parameters:
+      - name: greeting
+        label: Greeting Message
+        description: The greeting message to display
+        type: text
+        required: true
+        default: "Hello, World!"
+      - name: count
+        label: Count
+        description: Number of times to repeat the greeting
+        type: number
+        required: false
+        default: 1
+      - name: uppercase
+        label: Uppercase Output
+        description: Whether to display output in uppercase
+        type: boolean
+        required: false
+        default: false
+      - name: language
+        label: Language
+        description: Language for the greeting
+        type: select
+        required: false
+        default: english
+        options:
+          - english
+          - spanish
+          - french
+          - german
+
