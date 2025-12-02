@@ -19,29 +19,345 @@ const COLLECTIONS_PATH = `${CATALOG_PATH}/ansible_collections`;
 
 export async function syncCatalog(config: CatalogConfig): Promise<void> {
   const collectionPath = `${COLLECTIONS_PATH}/${config.namespace}/${config.collectionName}`;
-  const demosYamlPath = `${collectionPath}/demos.yaml`;
+  const gitDirPath = `${collectionPath}/.git`;
 
   return new Promise((resolve, reject) => {
     const cockpit = getCockpit();
-    cockpit.file(collectionPath).access()
-      .then(() => {
-        cockpit.spawn(['git', '-C', collectionPath, 'pull'], { err: 'out' })
-          .then(() => resolve())
-          .catch((error: any) => {
-            console.error('Git pull failed:', error);
-            reject(new Error(`Failed to pull catalog: ${error.message}`));
+
+    // Helper function to clone the repository
+    const cloneRepository = () => {
+      // Ensure the parent directory of collectionPath exists (mkdir -p creates all nested dirs)
+      const parentDir = collectionPath.substring(0, collectionPath.lastIndexOf('/'));
+      console.log('parentDir', parentDir);
+      console.log('collectionPath', collectionPath);
+      cockpit.spawn(['mkdir', '-p', parentDir], { err: 'out' })
+        .then(() => {
+          // Remove existing directory if it exists but isn't a git repo
+          return cockpit.spawn(['rm', '-rf', collectionPath], { err: 'out' }).catch(() => {
+            // Ignore errors if directory doesn't exist
           });
+        })
+        .then(() => {
+          // Now clone the repository
+          let outputBuffer = '';
+          let hasResolved = false;
+          const cloneProcess = cockpit.spawn(['git', 'clone', config.repoUrl, collectionPath], { err: 'out' });
+
+          cloneProcess.stream((data: string) => {
+            outputBuffer += data;
+          });
+
+          // Try to use done() callback if available
+          if (typeof (cloneProcess as any).done === 'function') {
+            (cloneProcess as any).done((exitCode: number) => {
+              if (hasResolved) return;
+              hasResolved = true;
+              if (exitCode === 0) {
+                resolve();
+              } else {
+                const errorMsg = outputBuffer.trim() || `Git clone failed with exit code ${exitCode}`;
+                console.error('Git clone failed:', errorMsg, 'Exit code:', exitCode);
+                reject(new Error(`Failed to clone catalog: ${errorMsg}`));
+              }
+            });
+
+            (cloneProcess as any).fail((error: any) => {
+              if (hasResolved) return;
+              hasResolved = true;
+              const exitStatus = error?.exit_status ?? error?.exitStatus;
+              let errorMsg = outputBuffer.trim();
+
+              if (!errorMsg && exitStatus !== undefined) {
+                switch (exitStatus) {
+                  case 128:
+                    errorMsg = 'Git clone failed (exit code 128). This may indicate authentication failure, repository not found, or permission denied.';
+                    break;
+                  case 1:
+                    errorMsg = 'Git clone failed (exit code 1). Check repository URL and permissions.';
+                    break;
+                  default:
+                    errorMsg = `Git clone failed with exit code ${exitStatus}`;
+                }
+              }
+
+              if (!errorMsg) {
+                errorMsg = error?.message || error?.toString() || String(error) || 'Unknown error';
+              }
+
+              console.error('Git clone process failed:', error, 'Exit status:', exitStatus, 'Output:', outputBuffer);
+              reject(new Error(`Failed to clone catalog: ${errorMsg}`));
+            });
+          }
+
+          // Fallback to promise chain
+          cloneProcess.then(() => {
+            if (!hasResolved) {
+              hasResolved = true;
+              resolve();
+            }
+          }).catch((error: any) => {
+            if (!hasResolved) {
+              hasResolved = true;
+              const exitStatus = error?.exit_status ?? error?.exitStatus;
+              let errorMsg = outputBuffer.trim();
+
+              if (!errorMsg && exitStatus !== undefined) {
+                switch (exitStatus) {
+                  case 128:
+                    errorMsg = 'Git clone failed (exit code 128). This may indicate authentication failure, repository not found, or permission denied.';
+                    break;
+                  case 1:
+                    errorMsg = 'Git clone failed (exit code 1). Check repository URL and permissions.';
+                    break;
+                  default:
+                    errorMsg = `Git clone failed with exit code ${exitStatus}`;
+                }
+              }
+
+              if (!errorMsg) {
+                errorMsg = error?.message || error?.toString() || String(error) || 'Git clone failed';
+              }
+
+              console.error('Git clone failed:', error, 'Exit status:', exitStatus, 'Output:', outputBuffer);
+              reject(new Error(`Failed to clone catalog: ${errorMsg}`));
+            }
+          });
+        })
+        .catch((error: any) => {
+          const exitStatus = error?.exit_status ?? error?.exitStatus;
+          let errorMsg = error?.message || error?.toString() || String(error);
+
+          if (exitStatus !== undefined) {
+            errorMsg = `Failed to create directory structure (exit code ${exitStatus}). ${errorMsg || 'Check permissions and disk space.'}`;
+          } else if (!errorMsg) {
+            errorMsg = 'Failed to create directory structure. Check permissions and disk space.';
+          }
+
+          console.error('Failed to create directory:', error, 'Exit status:', exitStatus);
+          reject(new Error(`Failed to clone catalog: ${errorMsg}`));
+        });
+    };
+
+    // Check if git repository exists by trying to read .git/HEAD file
+    cockpit.file(`${gitDirPath}/HEAD`).read()
+      .then(() => {
+        // Git repository appears to exist, try to pull latest changes
+        let outputBuffer = '';
+        let hasResolved = false;
+        const process = cockpit.spawn(['git', '-C', collectionPath, 'pull'], { err: 'out' });
+
+        process.stream((data: string) => {
+          outputBuffer += data;
+        });
+
+        // Try to use done() callback if available
+        if (typeof (process as any).done === 'function') {
+          (process as any).done((exitCode: number) => {
+            if (hasResolved) return;
+            hasResolved = true;
+            if (exitCode === 0) {
+              resolve();
+            } else {
+              const errorMsg = outputBuffer.trim() || `Git pull failed with exit code ${exitCode}`;
+              console.error('Git pull failed:', errorMsg, 'Exit code:', exitCode);
+              reject(new Error(`Failed to pull catalog: ${errorMsg}`));
+            }
+          });
+
+          (process as any).fail((error: any) => {
+            if (hasResolved) return;
+            hasResolved = true;
+            const exitStatus = error?.exit_status ?? error?.exitStatus;
+            let errorMsg = outputBuffer.trim();
+
+            // If directory doesn't exist, fall back to clone
+            if (errorMsg.includes('cannot change to') || errorMsg.includes('No such file or directory')) {
+              console.warn('Directory does not exist, falling back to clone');
+              cloneRepository();
+              return;
+            }
+
+            if (!errorMsg && exitStatus !== undefined) {
+              // Provide meaningful messages for common git error codes
+              switch (exitStatus) {
+                case 128:
+                  errorMsg = 'Git operation failed (exit code 128). This may indicate authentication failure, repository not found, or permission denied.';
+                  break;
+                case 1:
+                  errorMsg = 'Git operation failed (exit code 1). Check repository URL and permissions.';
+                  break;
+                default:
+                  errorMsg = `Git pull failed with exit code ${exitStatus}`;
+              }
+            }
+
+            if (!errorMsg) {
+              errorMsg = error?.message || error?.toString() || String(error) || 'Unknown error';
+            }
+
+            console.error('Git pull process failed:', error, 'Exit status:', exitStatus, 'Output:', outputBuffer);
+            reject(new Error(`Failed to pull catalog: ${errorMsg}`));
+          });
+        }
+
+        // Fallback to promise chain
+        process.then(() => {
+          if (!hasResolved) {
+            hasResolved = true;
+            resolve();
+          }
+        }).catch((error: any) => {
+          if (!hasResolved) {
+            hasResolved = true;
+            const exitStatus = error?.exit_status ?? error?.exitStatus;
+            let errorMsg = outputBuffer.trim();
+
+            // If directory doesn't exist, fall back to clone
+            if (errorMsg.includes('cannot change to') || errorMsg.includes('No such file or directory')) {
+              console.warn('Directory does not exist, falling back to clone');
+              cloneRepository();
+              return;
+            }
+
+            if (!errorMsg && exitStatus !== undefined) {
+              switch (exitStatus) {
+                case 128: {
+                  // Check if it's a directory issue - check both errorMsg and outputBuffer
+                  const fullError = (errorMsg + ' ' + outputBuffer).toLowerCase();
+                  if (fullError.includes('cannot change to') || fullError.includes('no such file or directory')) {
+                    console.warn('Directory does not exist, falling back to clone');
+                    cloneRepository();
+                    return;
+                  }
+                  errorMsg = 'Git operation failed (exit code 128). This may indicate authentication failure, repository not found, or permission denied.';
+                  break;
+                }
+                case 1:
+                  errorMsg = 'Git operation failed (exit code 1). Check repository URL and permissions.';
+                  break;
+                default:
+                  errorMsg = `Git pull failed with exit code ${exitStatus}`;
+              }
+            }
+
+            if (!errorMsg) {
+              errorMsg = error?.message || error?.toString() || String(error) || 'Git pull failed';
+            }
+
+            console.error('Git pull failed:', error, 'Exit status:', exitStatus, 'Output:', outputBuffer);
+            reject(new Error(`Failed to pull catalog: ${errorMsg}`));
+          }
+        });
       })
       .catch(() => {
-        const cockpit = getCockpit();
-        cockpit.spawn(['mkdir', '-p', collectionPath], { err: 'out' })
+        // Git repository doesn't exist, clone the repo
+        // Ensure the parent directory of collectionPath exists (mkdir -p creates all nested dirs)
+        const parentDir = collectionPath.substring(0, collectionPath.lastIndexOf('/'));
+        cockpit.spawn(['mkdir', '-p', parentDir], { err: 'out' })
           .then(() => {
-            return cockpit.spawn(['git', 'clone', config.repoUrl, collectionPath], { err: 'out' });
+            // Remove existing directory if it exists but isn't a git repo
+            return cockpit.spawn(['rm', '-rf', collectionPath], { err: 'out' }).catch(() => {
+              // Ignore errors if directory doesn't exist
+            });
           })
-          .then(() => resolve())
+          .then(() => {
+            // Now clone the repository
+            let outputBuffer = '';
+            let hasResolved = false;
+            const cloneProcess = cockpit.spawn(['git', 'clone', config.repoUrl, collectionPath], { err: 'out' });
+
+            cloneProcess.stream((data: string) => {
+              outputBuffer += data;
+            });
+
+            // Try to use done() callback if available
+            if (typeof (cloneProcess as any).done === 'function') {
+              (cloneProcess as any).done((exitCode: number) => {
+                if (hasResolved) return;
+                hasResolved = true;
+                if (exitCode === 0) {
+                  resolve();
+                } else {
+                  const errorMsg = outputBuffer.trim() || `Git clone failed with exit code ${exitCode}`;
+                  console.error('Git clone failed:', errorMsg, 'Exit code:', exitCode);
+                  reject(new Error(`Failed to clone catalog: ${errorMsg}`));
+                }
+              });
+
+              (cloneProcess as any).fail((error: any) => {
+                if (hasResolved) return;
+                hasResolved = true;
+                const exitStatus = error?.exit_status ?? error?.exitStatus;
+                let errorMsg = outputBuffer.trim();
+
+                if (!errorMsg && exitStatus !== undefined) {
+                  switch (exitStatus) {
+                    case 128:
+                      errorMsg = 'Git clone failed (exit code 128). This may indicate authentication failure, repository not found, or permission denied.';
+                      break;
+                    case 1:
+                      errorMsg = 'Git clone failed (exit code 1). Check repository URL and permissions.';
+                      break;
+                    default:
+                      errorMsg = `Git clone failed with exit code ${exitStatus}`;
+                  }
+                }
+
+                if (!errorMsg) {
+                  errorMsg = error?.message || error?.toString() || String(error) || 'Unknown error';
+                }
+
+                console.error('Git clone process failed:', error, 'Exit status:', exitStatus, 'Output:', outputBuffer);
+                reject(new Error(`Failed to clone catalog: ${errorMsg}`));
+              });
+            }
+
+            // Fallback to promise chain
+            cloneProcess.then(() => {
+              if (!hasResolved) {
+                hasResolved = true;
+                resolve();
+              }
+            }).catch((error: any) => {
+              if (!hasResolved) {
+                hasResolved = true;
+                const exitStatus = error?.exit_status ?? error?.exitStatus;
+                let errorMsg = outputBuffer.trim();
+
+                if (!errorMsg && exitStatus !== undefined) {
+                  switch (exitStatus) {
+                    case 128:
+                      errorMsg = 'Git clone failed (exit code 128). This may indicate authentication failure, repository not found, or permission denied.';
+                      break;
+                    case 1:
+                      errorMsg = 'Git clone failed (exit code 1). Check repository URL and permissions.';
+                      break;
+                    default:
+                      errorMsg = `Git clone failed with exit code ${exitStatus}`;
+                  }
+                }
+
+                if (!errorMsg) {
+                  errorMsg = error?.message || error?.toString() || String(error) || 'Git clone failed';
+                }
+
+                console.error('Git clone failed:', error, 'Exit status:', exitStatus, 'Output:', outputBuffer);
+                reject(new Error(`Failed to clone catalog: ${errorMsg}`));
+              }
+            });
+          })
           .catch((error: any) => {
-            console.error('Git clone failed:', error);
-            reject(new Error(`Failed to clone catalog: ${error.message}`));
+            const exitStatus = error?.exit_status ?? error?.exitStatus;
+            let errorMsg = error?.message || error?.toString() || String(error);
+
+            if (exitStatus !== undefined) {
+              errorMsg = `Failed to create directory structure (exit code ${exitStatus}). ${errorMsg || 'Check permissions and disk space.'}`;
+            } else if (!errorMsg) {
+              errorMsg = 'Failed to create directory structure. Check permissions and disk space.';
+            }
+
+            console.error('Failed to create directory:', error, 'Exit status:', exitStatus);
+            reject(new Error(`Failed to clone catalog: ${errorMsg}`));
           });
       });
   });
@@ -170,14 +486,14 @@ function parseDemosYaml(content: string): DemoDefinition[] {
         const requiredMatch = trimmed.match(/required:\s*(.+)/);
         if (requiredMatch) {
           const requiredValue = requiredMatch[1].trim().replace(/['"]/g, '');
-          currentParameter.required = requiredValue === 'true' || requiredValue === true;
+          currentParameter.required = requiredValue === 'true';
         }
       } else if (trimmed.startsWith('options:')) {
         const optionsMatch = trimmed.match(/options:\s*(.+)/);
         if (optionsMatch) {
           const optionsLine = optionsMatch[1].trim();
           if (optionsLine.startsWith('[')) {
-            const optionsStr = optionsLine.replace(/[\[\]]/g, '');
+            const optionsStr = optionsLine.replace(/[[\]]/g, '');
             currentParameter.options = optionsStr.split(',').map(opt => opt.trim().replace(/['"]/g, ''));
           } else {
             let j = i + 1;
@@ -272,7 +588,7 @@ function parseRoleDefaults(content: string): RoleVariable[] {
     const varMatch = trimmed.match(/^([a-zA-Z_][a-zA-Z0-9_]*):\s*(.+)$/);
     if (varMatch) {
       const varName = varMatch[1];
-      let varValue = varMatch[2].trim();
+      const varValue = varMatch[2].trim();
 
       // Skip metadata keys (_label, _description)
       if (varName.endsWith('_label') || varName.endsWith('_description')) {

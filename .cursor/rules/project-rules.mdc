@@ -21,11 +21,11 @@ To ensure the Ansible Runner can use the cloned repo as a Collection, the plugin
   │       └── <namespace>/      <-- Inferred from user input or default to 'local'
   │           └── <collection>/ <-- The Git Clone target
   │               ├── galaxy.yml
-  │               ├── demos.yaml
   │               ├── playbooks/
   │               └── roles/
   ├── meta/
   │   └── meta_playbook.yml  <-- Main meta playbook for execution
+  ├── demos.yaml
   └── instances/
       └── <instance-id>/
           ├── spec.json
@@ -85,7 +85,7 @@ To ensure the Ansible Runner can use the cloned repo as a Collection, the plugin
 
 **demos.yaml Structure:**
 
-The `demos.yaml` file in the collection root must follow this structure:
+The `demos.yaml` file in the collection repo root must follow this structure:
 
 ```yaml
 demos:

@@ -71,7 +71,6 @@ export const LaunchModal: React.FC<LaunchModalProps> = ({ demo, isOpen, onClose 
                 label={param.label || param.name}
                 isRequired={param.required}
                 fieldId={name}
-                helperText={param.description}
               >
                 <TextInput
                   id={name}
@@ -79,6 +78,11 @@ export const LaunchModal: React.FC<LaunchModalProps> = ({ demo, isOpen, onClose 
                   onChange={(_, value) => field.onChange(value)}
                   validated={errors[name] ? 'error' : 'default'}
                 />
+                {param.description && (
+                  <HelperText>
+                    <HelperTextItem>{param.description}</HelperTextItem>
+                  </HelperText>
+                )}
                 {errors[name] && (
                   <HelperText>
                     <HelperTextItem variant="error">This field is required</HelperTextItem>
@@ -101,7 +105,6 @@ export const LaunchModal: React.FC<LaunchModalProps> = ({ demo, isOpen, onClose 
                 label={param.label || param.name}
                 isRequired={param.required}
                 fieldId={name}
-                helperText={param.description}
               >
                 <NumberInput
                   id={name}
@@ -113,6 +116,11 @@ export const LaunchModal: React.FC<LaunchModalProps> = ({ demo, isOpen, onClose 
                   }}
                   onPlus={() => field.onChange((Number(field.value) || 0) + 1)}
                 />
+                {param.description && (
+                  <HelperText>
+                    <HelperTextItem>{param.description}</HelperTextItem>
+                  </HelperText>
+                )}
                 {errors[name] && (
                   <HelperText>
                     <HelperTextItem variant="error">This field is required</HelperTextItem>
@@ -130,13 +138,18 @@ export const LaunchModal: React.FC<LaunchModalProps> = ({ demo, isOpen, onClose 
             name={name}
             control={control}
             render={({ field }) => (
-              <FormGroup fieldId={name} helperText={param.description}>
+              <FormGroup fieldId={name}>
                 <Checkbox
                   id={name}
                   label={param.label || param.name}
                   isChecked={field.value === true}
                   onChange={(_, checked) => field.onChange(checked)}
                 />
+                {param.description && (
+                  <HelperText>
+                    <HelperTextItem>{param.description}</HelperTextItem>
+                  </HelperText>
+                )}
               </FormGroup>
             )}
           />
@@ -157,7 +170,6 @@ export const LaunchModal: React.FC<LaunchModalProps> = ({ demo, isOpen, onClose 
                   label={param.label || param.name}
                   isRequired={param.required}
                   fieldId={name}
-                  helperText={param.description}
                 >
                   <Select
                     id={name}
@@ -182,6 +194,11 @@ export const LaunchModal: React.FC<LaunchModalProps> = ({ demo, isOpen, onClose 
                       ))}
                     </SelectList>
                   </Select>
+                  {param.description && (
+                    <HelperText>
+                      <HelperTextItem>{param.description}</HelperTextItem>
+                    </HelperText>
+                  )}
                   {errors[name] && (
                     <HelperText>
                       <HelperTextItem variant="error">This field is required</HelperTextItem>
