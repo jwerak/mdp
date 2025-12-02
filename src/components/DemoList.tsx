@@ -1,5 +1,6 @@
 import {
   Alert,
+  Badge,
   Bullseye,
   Button,
   Card,
@@ -121,8 +122,14 @@ export const DemoList: React.FC<DemoListProps> = ({ onConfigureCatalog }) => {
                 >
                   <div>
                     <strong>{demo.name}</strong>
+                    <Badge style={{ marginLeft: '0.5rem' }}>{demo.type}</Badge>
+                    {demo.description && (
+                      <div style={{ fontSize: '0.875rem', color: 'var(--pf-v6-global--Color--200)', marginTop: '0.25rem' }}>
+                        {demo.description}
+                      </div>
+                    )}
                     <div style={{ fontSize: '0.875rem', color: 'var(--pf-v6-global--Color--200)', marginTop: '0.25rem' }}>
-                      {demo.playbook}
+                      Path: {demo.path}
                     </div>
                   </div>
                 </ListItem>

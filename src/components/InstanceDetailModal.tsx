@@ -101,7 +101,13 @@ export const InstanceDetailModal: React.FC<InstanceDetailModalProps> = ({ instan
                     </DescriptionListGroup>
                   )}
                   <DescriptionListGroup>
-                    <DescriptionListTerm>Playbook</DescriptionListTerm>
+                    <DescriptionListTerm>Type</DescriptionListTerm>
+                    <DescriptionListDescription>
+                      <Badge>{currentInstance.spec.demoType}</Badge>
+                    </DescriptionListDescription>
+                  </DescriptionListGroup>
+                  <DescriptionListGroup>
+                    <DescriptionListTerm>Path</DescriptionListTerm>
                     <DescriptionListDescription>{currentInstance.spec.playbook_path}</DescriptionListDescription>
                   </DescriptionListGroup>
                   {currentInstance.status.message && (
@@ -129,6 +135,25 @@ export const InstanceDetailModal: React.FC<InstanceDetailModalProps> = ({ instan
                     </DescriptionListDescription>
                   </DescriptionListGroup>
                 </DescriptionList>
+        {currentInstance.status.summary && currentInstance.status.summary.collected_info && currentInstance.status.summary.collected_info.length > 0 && (
+          <>
+            <Divider style={{ marginTop: '1.5rem', marginBottom: '1.5rem' }} />
+            <Title headingLevel="h3" size="md" style={{ marginBottom: '1rem' }}>
+              Execution Summary
+            </Title>
+            <DescriptionList>
+              {currentInstance.status.summary.collected_info.map((item, index) => (
+                <DescriptionListGroup key={index}>
+                  <DescriptionListTerm>{item.name}</DescriptionListTerm>
+                  <DescriptionListDescription>
+                    {item.description && <div style={{ fontSize: '0.875rem', color: 'var(--pf-v6-global--Color--200)', marginBottom: '0.25rem' }}>{item.description}</div>}
+                    <div>{item.value}</div>
+                  </DescriptionListDescription>
+                </DescriptionListGroup>
+              ))}
+            </DescriptionList>
+          </>
+        )}
         <Divider style={{ marginTop: '1.5rem', marginBottom: '1.5rem' }} />
         <Title headingLevel="h3" size="md" style={{ marginBottom: '1rem' }}>
           Execution Output

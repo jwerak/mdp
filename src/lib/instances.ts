@@ -1,4 +1,4 @@
-import { getPlaybookPath } from './catalog';
+import { getPlaybookPath, getVariableDefinitions } from './catalog';
 import { loadConfig } from './config';
 import { CatalogConfig, DemoDefinition, Instance, InstanceSpec, InstanceStatus } from './types';
 
@@ -17,6 +17,7 @@ function getCockpit() {
 
 const BASE_PATH = '/var/lib/cockpit-plugin-demos';
 const INSTANCES_PATH = `${BASE_PATH}/instances`;
+const META_PLAYBOOK_PATH = `${BASE_PATH}/meta/meta_playbook.yml`;
 
 function generateInstanceId(demoId: string): string {
   const randomStr = Math.random().toString(36).substring(2, 6).toLowerCase();
@@ -33,13 +34,17 @@ export async function createInstance(
   const specPath = `${instancePath}/spec.json`;
   const statusPath = `${instancePath}/status.json`;
 
-  const playbookPath = getPlaybookPath(config, demo.playbook);
+  const playbookPath = getPlaybookPath(config, demo.type, demo.path);
+  const variableDefinitions = getVariableDefinitions(demo.parameters);
 
   const spec: InstanceSpec = {
     demoId: demo.id,
     demoName: demo.name,
+    demoType: demo.type,
+    demoPath: demo.path,
     playbook_path: playbookPath,
     parameters: formData,
+    variable_definitions: variableDefinitions,
     createdAt: new Date().toISOString()
   };
 
@@ -191,12 +196,22 @@ export async function executeInstance(
   let outputBuffer = '';
 
   const updateStatus = async (updates: Partial<InstanceStatus>) => {
-    const currentStatus = instance.status;
-    const newStatus: InstanceStatus = {
-      ...currentStatus,
-      ...updates
-    };
-    return cockpit.file(statusPath).replace(JSON.stringify(newStatus, null, 2));
+    try {
+      const currentStatusContent = await cockpit.file(statusPath).read();
+      const currentStatus: InstanceStatus = JSON.parse(currentStatusContent);
+      const newStatus: InstanceStatus = {
+        ...currentStatus,
+        ...updates
+      };
+      return cockpit.file(statusPath).replace(JSON.stringify(newStatus, null, 2));
+    } catch (error: any) {
+      // If reading fails, try to write anyway
+      const newStatus: InstanceStatus = {
+        state: 'running',
+        ...updates
+      };
+      return cockpit.file(statusPath).replace(JSON.stringify(newStatus, null, 2));
+    }
   };
 
   await updateStatus({
@@ -205,15 +220,27 @@ export async function executeInstance(
     output: ''
   });
 
-  const playbookPath = instance.spec.playbook_path;
-  const extraVars = JSON.stringify(instance.spec.parameters);
+  // Prepare extra vars for meta playbook
+  // For playbooks, demo_path should be the full playbook path
+  // For roles, demo_path should be the role name
+  const demoPath = instance.spec.demoType === 'playbook'
+    ? instance.spec.playbook_path
+    : instance.spec.demoPath;
+
+  const extraVars = {
+    instance_id: instanceId,
+    demo_type: instance.spec.demoType,
+    demo_path: demoPath,
+    demo_vars: instance.spec.parameters,
+    variable_definitions: instance.spec.variable_definitions
+  };
 
   const ansibleNavigatorArgs = [
     'ansible-navigator',
     'run',
-    playbookPath,
+    META_PLAYBOOK_PATH,
     '--eei', config.executionEnvironment,
-    '--extra-vars', extraVars,
+    '--extra-vars', JSON.stringify(extraVars),
     '--mode', 'stdout'
   ];
 
@@ -239,18 +266,40 @@ export async function executeInstance(
       }
     });
 
-    process.done((exitCode: number) => {
-      const finalStatus: Partial<InstanceStatus> = {
+    process.done(async (exitCode: number) => {
+      // Try to read status.json written by meta playbook
+      let finalStatus: Partial<InstanceStatus> = {
         output: outputBuffer,
         completedAt: new Date().toISOString()
       };
 
+      try {
+        const statusContent = await cockpit.file(statusPath).read();
+        const playbookStatus = JSON.parse(statusContent);
+        if (playbookStatus.summary) {
+          finalStatus.summary = playbookStatus.summary;
+        }
+        if (playbookStatus.message) {
+          finalStatus.message = playbookStatus.message;
+        }
+        if (playbookStatus.completedAt) {
+          finalStatus.completedAt = playbookStatus.completedAt;
+        }
+      } catch (error: any) {
+        // If meta playbook didn't write status, use default
+        console.warn('Could not read status from meta playbook:', error);
+      }
+
       if (exitCode === 0) {
         finalStatus.state = 'completed';
-        finalStatus.message = 'Playbook execution completed successfully';
+        if (!finalStatus.message) {
+          finalStatus.message = 'Playbook execution completed successfully';
+        }
       } else {
         finalStatus.state = 'failed';
-        finalStatus.error = `Playbook execution failed with exit code ${exitCode}`;
+        if (!finalStatus.error) {
+          finalStatus.error = `Playbook execution failed with exit code ${exitCode}`;
+        }
       }
 
       updateStatus(finalStatus)

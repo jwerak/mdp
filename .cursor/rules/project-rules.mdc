@@ -13,54 +13,150 @@ Act as a Senior Linux Systems Developer and React Expert. I need you to scaffold
 
 **Directory Structure (CRITICAL):**
 To ensure the Ansible Runner can use the cloned repo as a Collection, the plugin must maintain this Host structure:
-`/var/lib/cockpit-plugin-demos/`
+
+```text
+/var/lib/cockpit-plugin-demos/
   ├── catalog/
   │   └── ansible_collections/
   │       └── <namespace>/      <-- Inferred from user input or default to 'local'
   │           └── <collection>/ <-- The Git Clone target
   │               ├── galaxy.yml
   │               ├── demos.yaml
-  │               └── playbooks/
+  │               ├── playbooks/
+  │               └── roles/
+  ├── meta/
+  │   └── meta_playbook.yml  <-- Main meta playbook for execution
   └── instances/
       └── <instance-id>/
           ├── spec.json
           └── status.json
+```
 
 **Requirements:**
 
 1.  **Data Models (`src/lib/types.ts`):**
-    - `DemoParameter`: { name: string, label: string, type: 'text' | 'number' | 'boolean' | 'select', options?: string[], default?: any }
-    - `DemoDefinition`: { id: string, name: string, playbook: string, parameters: DemoParameter[] }
+    - `DemoParameter`: { name: string, label?: string, description?: string, type: 'text' | 'number' | 'boolean' | 'select', required: boolean, options?: string[], default?: any }
+    - `DemoDefinition`: { id: string, name: string, description?: string, type: 'playbook' | 'role', path: string, parameters: DemoParameter[] }
     - `CatalogConfig`: { repoUrl: string, namespace: string, collectionName: string, executionEnvironment?: string }
+    - `InstanceSpec`: Includes demoType, demoPath, and variable_definitions array
+    - `InstanceStatus`: Includes optional summary field with collected_info array
 
 2.  **Catalog Service (`src/lib/catalog.ts`):**
     - `syncCatalog(config)`:
       - Uses `cockpit.spawn` to `git clone` (or `git pull`) into the correct nested path: `catalog/ansible_collections/{namespace}/{collectionName}`.
     - `getDemos()`:
       - Reads `demos.yaml` from the cloned repo.
+      - For role-based demos, auto-discovers variables from `roles/<role-name>/defaults/main.yml`.
+      - Merges role defaults with demos.yaml parameters (demos.yaml takes precedence for metadata).
       - Returns `DemoDefinition[]`.
+    - `discoverRoleVariables()`:
+      - Reads role defaults/main.yml and extracts variables, labels (`*_label`), and descriptions (`*_description`).
+    - `mergeRoleAndDemoParameters()`:
+      - Combines role variables with demos.yaml parameters, respecting precedence rules.
+    - `getVariableDefinitions()`:
+      - Generates variable definitions array for meta playbook validation.
 
 3.  **Instance Service (`src/lib/instances.ts`):**
     - `createInstance(demoId, formData)`:
       - Generates ID.
       - Writes `spec.json` to `instances/<id>/`.
-      - **Important:** `spec.json` must include the `playbook_path` derived from the catalog so the Automation knows what to run.
+      - **Important:** `spec.json` must include `demoType`, `demoPath`, `playbook_path`, and `variable_definitions`.
     - `executeInstance(instanceId, executionEnvironment)`:
+      - Calls meta playbook (`/var/lib/cockpit-plugin-demos/meta/meta_playbook.yml`) instead of direct playbook.
+      - Passes `instance_id`, `demo_type`, `demo_path`, `demo_vars`, and `variable_definitions` as extra-vars.
+      - Meta playbook validates variables and executes the target playbook/role.
+      - Parses status.json written by meta playbook (includes summary with collected_info).
       - Triggers `ansible-navigator` via `systemd-run` using the configured execution environment.
       - Captures and streams command output to the web UI.
 
 4.  **UI Components (PatternFly):**
     - **Settings:** Form to configure Git Repo URL, Namespace, Collection Name, and Execution Environment.
-    - **Catalog Grid:** Cards displaying available demos from `demos.yaml`.
+    - **Catalog Grid:** Cards displaying available demos from `demos.yaml` with type badges (playbook/role) and descriptions.
     - **Dynamic Launch Modal:**
       - Takes a `DemoDefinition`.
       - **Dynamically renders inputs** based on `parameters` array.
+      - Displays parameter descriptions as helper text.
+      - Uses `required` field for validation instead of checking default value.
       - Use `react-hook-form` or controlled state to capture values.
+    - **Instance Detail Modal:**
+      - Shows execution summary with collected_info from status.json.
+      - Displays demo type badge.
     - **Instance List:** Polling `status.json` for deployment updates.
+
+**demos.yaml Structure:**
+
+The `demos.yaml` file in the collection root must follow this structure:
+
+```yaml
+demos:
+  - id: <unique-demo-id>
+    name: <human-readable-name>
+    description: <optional-description>
+    type: playbook | role
+    path: <relative-path-to-playbook-or-role>
+    parameters:
+      - name: <variable-name>
+        label: <display-label>  # Optional if defined in role
+        description: <help-text-description>  # Optional if defined in role
+        type: text | number | boolean | select  # Required for validation
+        required: true | false  # Required for validation
+        default: <default-value>  # Optional - role default will be used if not specified
+        options: [<for-select-type>]  # Required for select type
+```
+
+**Role Variable Metadata Convention:**
+
+Roles can define variable metadata in `roles/<role-name>/defaults/main.yml`:
+
+```yaml
+# Standard variable with default value
+my_variable: "default_value"
+
+# Variable metadata (optional, used for UI)
+my_variable_label: "Display Label"
+my_variable_description: "Help text explaining what this variable does"
+```
+
+- Variable: `variable_name`
+- Label: `variable_name_label` (optional)
+- Description: `variable_name_description` (optional)
+- Merging: demos.yaml metadata takes precedence over role metadata, but role defaults are used when not specified in demos.yaml
+
+**Meta Playbook Pattern:**
+
+The meta playbook (`/var/lib/cockpit-plugin-demos/meta/meta_playbook.yml`) validates variables and executes demos:
+- Validates required variables are defined
+- Validates variable types (text, number, boolean, select)
+- Includes playbook or role based on demo_type
+- Collects variable information for summary
+- Writes status.json with summary including collected_info
+
+**Status File Structure:**
+
+```json
+{
+  "state": "pending" | "running" | "completed" | "failed",
+  "message": "<status-message>",
+  "startedAt": "<iso-timestamp>",
+  "completedAt": "<iso-timestamp>",
+  "error": "<error-message-if-failed>",
+  "output": "<ansible-output>",
+  "summary": {
+    "collected_info": [
+      {
+        "description": "<description>",
+        "name": "<variable-name>",
+        "value": "<variable-value>"
+      }
+    ]
+  }
+}
+```
 
 **Constraints:**
 - Use `cockpit.spawn` for Git operations.
 - Handle missing `demos.yaml` gracefully (show "Invalid Catalog" error).
+- Handle missing role defaults gracefully (log warning, use demos.yaml only).
 - Ensure file paths used in `cockpit.file` are constructed safely.
-
-Please generate the file structure, the TypeScript interfaces, and the logic for the **Catalog Service** and the **Dynamic Form Component**.
+- Validate demo type is either 'playbook' or 'role'.
+- Handle YAML parsing errors in role defaults gracefully.

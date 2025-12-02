@@ -65,12 +65,13 @@ export const LaunchModal: React.FC<LaunchModalProps> = ({ demo, isOpen, onClose 
             key={index}
             name={name}
             control={control}
-            rules={{ required: param.default === undefined }}
+            rules={{ required: param.required }}
             render={({ field }) => (
               <FormGroup
                 label={param.label || param.name}
-                isRequired={param.default === undefined}
+                isRequired={param.required}
                 fieldId={name}
+                helperText={param.description}
               >
                 <TextInput
                   id={name}
@@ -94,12 +95,13 @@ export const LaunchModal: React.FC<LaunchModalProps> = ({ demo, isOpen, onClose 
             key={index}
             name={name}
             control={control}
-            rules={{ required: param.default === undefined }}
+            rules={{ required: param.required }}
             render={({ field }) => (
               <FormGroup
                 label={param.label || param.name}
-                isRequired={param.default === undefined}
+                isRequired={param.required}
                 fieldId={name}
+                helperText={param.description}
               >
                 <NumberInput
                   id={name}
@@ -128,7 +130,7 @@ export const LaunchModal: React.FC<LaunchModalProps> = ({ demo, isOpen, onClose 
             name={name}
             control={control}
             render={({ field }) => (
-              <FormGroup fieldId={name}>
+              <FormGroup fieldId={name} helperText={param.description}>
                 <Checkbox
                   id={name}
                   label={param.label || param.name}
@@ -146,15 +148,16 @@ export const LaunchModal: React.FC<LaunchModalProps> = ({ demo, isOpen, onClose 
             key={index}
             name={name}
             control={control}
-            rules={{ required: param.default === undefined }}
+            rules={{ required: param.required }}
             render={({ field }) => {
               const isOpen = selectOpenStates[name] || false;
               const selectedLabel = param.options?.find(opt => opt === field.value) || 'Select an option';
               return (
                 <FormGroup
                   label={param.label || param.name}
-                  isRequired={param.default === undefined}
+                  isRequired={param.required}
                   fieldId={name}
+                  helperText={param.description}
                 >
                   <Select
                     id={name}

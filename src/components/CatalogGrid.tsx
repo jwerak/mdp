@@ -7,7 +7,8 @@ import {
   GridItem,
   Title,
   Alert,
-  Spinner
+  Spinner,
+  Badge
 } from '@patternfly/react-core';
 import { getDemos } from '../lib/catalog';
 import { loadConfig } from '../lib/config';
@@ -81,9 +82,13 @@ export const CatalogGrid: React.FC = () => {
                     style={{ height: '100%', cursor: 'pointer' }}
                     isClickable
                   >
-                    <CardTitle>{demo.name}</CardTitle>
+                    <CardTitle>
+                      {demo.name}
+                      <Badge style={{ marginLeft: '0.5rem' }}>{demo.type}</Badge>
+                    </CardTitle>
                     <CardBody>
-                      <p><strong>Playbook:</strong> {demo.playbook}</p>
+                      {demo.description && <p style={{ marginBottom: '0.5rem' }}>{demo.description}</p>}
+                      <p><strong>Path:</strong> {demo.path}</p>
                       <p><strong>Parameters:</strong> {demo.parameters.length}</p>
                     </CardBody>
                   </Card>

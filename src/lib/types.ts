@@ -1,7 +1,9 @@
 export interface DemoParameter {
   name: string;
-  label: string;
+  label?: string;
+  description?: string;
   type: 'text' | 'number' | 'boolean' | 'select';
+  required: boolean;
   options?: string[];
   default?: any;
 }
@@ -9,7 +11,9 @@ export interface DemoParameter {
 export interface DemoDefinition {
   id: string;
   name: string;
-  playbook: string;
+  description?: string;
+  type: 'playbook' | 'role';
+  path: string;
   parameters: DemoParameter[];
 }
 
@@ -23,8 +27,11 @@ export interface CatalogConfig {
 export interface InstanceSpec {
   demoId: string;
   demoName: string;
+  demoType: 'playbook' | 'role';
+  demoPath: string;
   playbook_path: string;
   parameters: Record<string, any>;
+  variable_definitions: DemoParameter[];
   createdAt: string;
 }
 
@@ -35,6 +42,13 @@ export interface InstanceStatus {
   completedAt?: string;
   error?: string;
   output?: string;
+  summary?: {
+    collected_info: Array<{
+      description: string;
+      name: string;
+      value: string;
+    }>;
+  };
 }
 
 export interface Instance {
