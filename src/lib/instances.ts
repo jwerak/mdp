@@ -103,35 +103,101 @@ export async function getAllInstances(): Promise<Instance[]> {
     // Ensure the directory exists first
     cockpit.spawn(['mkdir', '-p', INSTANCES_PATH], { err: 'out' })
       .then(() => {
-        const file = cockpit.file(INSTANCES_PATH);
+        // Use ls command directly as file.list() may not work reliably for directories
+        let outputBuffer = '';
+        const lsProcess = cockpit.spawn(['ls', '-1', INSTANCES_PATH], { err: 'out' });
 
-        // Check if list() method exists before calling it
-        if (typeof file.list !== 'function') {
-          resolve([]);
-          return;
-        }
+        lsProcess.stream((data: string) => {
+          outputBuffer += data;
+          console.log('ls stream data:', data);
+        });
 
-        return file.list();
+        return new Promise<string[]>((resolveLs) => {
+          let hasResolved = false;
+
+          const resolveOnce = (result: string[]) => {
+            if (!hasResolved) {
+              hasResolved = true;
+              resolveLs(result);
+            }
+          };
+
+          // Handle done callback if available (preferred method)
+          if (typeof (lsProcess as any).done === 'function') {
+            (lsProcess as any).done((exitCode: number | undefined) => {
+              console.log('ls done callback, exit code:', exitCode, 'outputBuffer length:', outputBuffer.length, 'content:', outputBuffer);
+              // If we have output, use it regardless of exit code (exit code might be undefined in some cases)
+              if (outputBuffer.trim()) {
+                const fileList = outputBuffer.trim().split('\n').filter(f => f && !f.startsWith('.'));
+                console.log('ls command found directories (via done):', fileList);
+                resolveOnce(fileList);
+              } else if (exitCode === 0 || exitCode === undefined) {
+                // Exit code 0 or undefined with no output means empty directory
+                console.log('ls command succeeded but output is empty (exit code:', exitCode, ')');
+                resolveOnce([]);
+              } else {
+                // Non-zero exit code with no output - wait for promise chain as fallback
+                console.log('ls command failed with exit code:', exitCode, '- waiting for promise chain');
+              }
+            });
+          }
+
+          // Handle fail callback if available
+          if (typeof (lsProcess as any).fail === 'function') {
+            (lsProcess as any).fail((error: any) => {
+              console.error('ls command failed (via fail):', error);
+              resolveOnce([]);
+            });
+          }
+
+          // Also handle the promise chain as fallback
+          lsProcess.then(() => {
+            console.log('ls promise resolved, outputBuffer length:', outputBuffer.length, 'content:', outputBuffer);
+            // Small delay to ensure stream has finished
+            setTimeout(() => {
+              if (outputBuffer.trim()) {
+                const fileList = outputBuffer.trim().split('\n').filter(f => f && !f.startsWith('.'));
+                console.log('ls command found directories (via promise):', fileList);
+                resolveOnce(fileList);
+              } else {
+                console.log('ls command returned empty output (via promise)');
+                resolveOnce([]);
+              }
+            }, 100);
+          }).catch((error: any) => {
+            console.error('ls promise rejected:', error);
+            resolveOnce([]);
+          });
+        });
       })
-      .then((files: string[] | undefined) => {
-        // If list() wasn't called (because it doesn't exist), resolve empty
-        if (files === undefined) {
+      .then((files: string[]) => {
+        if (!files || files.length === 0) {
+          console.log('No instance directories found');
           resolve([]);
           return;
         }
 
-        if (!files || files.length === 0) {
-          resolve([]);
-          return;
-        }
+        console.log(`Found ${files.length} instance directories:`, files);
 
         const instancePromises = files
           .filter(file => !file.startsWith('.'))
-          .map(instanceId => getInstance(instanceId).catch(() => null));
+          .map(instanceId =>
+            getInstance(instanceId)
+              .then(instance => {
+                console.log('Successfully loaded instance:', instanceId);
+                return instance;
+              })
+              .catch((err: any) => {
+                console.error(`Failed to load instance ${instanceId}:`, err);
+                return null;
+              })
+          );
 
         Promise.all(instancePromises)
           .then(instances => {
-            resolve(instances.filter((i): i is Instance => i !== null));
+            const validInstances = instances.filter((i): i is Instance => i !== null);
+            console.log(`Loaded ${validInstances.length} instances out of ${files.length} directories`);
+            resolve(validInstances);
           })
           .catch((err: any) => {
             // If there's an error loading instances, return empty array instead of rejecting
@@ -157,6 +223,48 @@ export async function deleteInstance(instanceId: string): Promise<void> {
       .catch((error: any) => {
         console.error('Failed to delete instance:', error);
         reject(new Error(`Failed to delete instance: ${error.message}`));
+      });
+  });
+}
+
+export async function updateInstanceStatus(
+  instanceId: string,
+  updates: Partial<InstanceStatus>
+): Promise<void> {
+  const statusPath = `${INSTANCES_PATH}/${instanceId}/status.json`;
+  const cockpit = getCockpit();
+
+  return new Promise((resolve, reject) => {
+    cockpit.file(statusPath).read()
+      .then((content: string) => {
+        try {
+          const currentStatus: InstanceStatus = JSON.parse(content);
+          const newStatus: InstanceStatus = {
+            ...currentStatus,
+            ...updates
+          };
+          return cockpit.file(statusPath).replace(JSON.stringify(newStatus, null, 2));
+        } catch (error: any) {
+          // If parsing fails, create new status
+          const newStatus: InstanceStatus = {
+            state: 'pending',
+            ...updates
+          };
+          return cockpit.file(statusPath).replace(JSON.stringify(newStatus, null, 2));
+        }
+      })
+      .then(() => resolve())
+      .catch(() => {
+        // If file doesn't exist, create it
+        const newStatus: InstanceStatus = {
+          state: 'pending',
+          ...updates
+        };
+        cockpit.file(statusPath).replace(JSON.stringify(newStatus, null, 2))
+          .then(() => resolve())
+          .catch((err: any) => {
+            reject(new Error(`Failed to update instance status: ${err.message}`));
+          });
       });
   });
 }
@@ -235,13 +343,15 @@ export async function executeInstance(
     variable_definitions: instance.spec.variable_definitions
   };
 
-  const ansibleNavigatorArgs = [
-    'ansible-navigator',
-    'run',
-    META_PLAYBOOK_PATH,
-    '--eei', config.executionEnvironment,
-    '--extra-vars', JSON.stringify(extraVars),
-    '--mode', 'stdout'
+  // systemd-run --user doesn't inherit full PATH, so we wrap in bash with explicit PATH
+  // This ensures ansible-navigator can be found in common installation locations
+  const ansibleNavigatorCmd = [
+    'bash', '-c',
+    `export PATH="/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin:$HOME/.local/bin:$PATH" && ` +
+    `ansible-navigator run "${META_PLAYBOOK_PATH}" ` +
+    `--eei "${config.executionEnvironment}" ` +
+    `--extra-vars '${JSON.stringify(extraVars)}' ` +
+    `--mode stdout`
   ];
 
   const systemdRunArgs = [
@@ -251,13 +361,42 @@ export async function executeInstance(
     '--collect',
     '--wait',
     '--',
-    ...ansibleNavigatorArgs
+    ...ansibleNavigatorCmd
   ];
 
   return new Promise((resolve, reject) => {
-    const process = cockpit.spawn(systemdRunArgs, {
-      err: 'out'
-    });
+    let hasRejected = false;
+
+    const handleError = async (error: any, errorMessage: string) => {
+      if (hasRejected) return;
+      hasRejected = true;
+
+      const finalErrorMsg = errorMessage || error?.message || error?.toString() || 'Execution failed';
+
+      try {
+        await updateStatus({
+          state: 'failed',
+          error: finalErrorMsg,
+          output: outputBuffer.trim() || finalErrorMsg,
+          completedAt: new Date().toISOString()
+        });
+      } catch (statusErr: any) {
+        console.error('Failed to update status to failed:', statusErr);
+      }
+
+      reject(new Error(finalErrorMsg));
+    };
+
+    let process;
+    try {
+      process = cockpit.spawn(systemdRunArgs, {
+        err: 'out'
+      });
+    } catch (spawnError: any) {
+      // If spawn fails immediately, update status and reject
+      handleError(spawnError, `Failed to start execution: ${spawnError?.message || 'Unknown error'}`);
+      return;
+    }
 
     process.stream((data: string) => {
       outputBuffer += data;
@@ -268,7 +407,7 @@ export async function executeInstance(
 
     process.done(async (exitCode: number) => {
       // Try to read status.json written by meta playbook
-      let finalStatus: Partial<InstanceStatus> = {
+      const finalStatus: Partial<InstanceStatus> = {
         output: outputBuffer,
         completedAt: new Date().toISOString()
       };
@@ -316,14 +455,33 @@ export async function executeInstance(
         });
     });
 
-    process.fail((error: any) => {
-      updateStatus({
-        state: 'failed',
-        error: error.message || 'Failed to start execution',
-        output: outputBuffer,
-        completedAt: new Date().toISOString()
-      }).catch(() => { });
-      reject(error);
+    process.fail(async (error: any) => {
+      let errorMsg = outputBuffer.trim();
+
+      if (!errorMsg) {
+        errorMsg = error?.message || error?.toString() || 'Failed to start execution';
+      }
+
+      // Extract error from output if available
+      if (outputBuffer.includes('Failed to find executable') || outputBuffer.includes('No such file')) {
+        errorMsg = outputBuffer.split('\n').find(line =>
+          line.includes('Failed') || line.includes('No such file')
+        ) || errorMsg;
+      }
+
+      try {
+        await updateStatus({
+          state: 'failed',
+          error: errorMsg,
+          output: outputBuffer || errorMsg,
+          completedAt: new Date().toISOString()
+        });
+        console.log('Instance status updated to failed after process.fail');
+      } catch (statusErr: any) {
+        console.error('Failed to update status in process.fail:', statusErr);
+      }
+
+      reject(new Error(errorMsg));
     });
   });
 }

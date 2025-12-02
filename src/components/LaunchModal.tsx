@@ -20,7 +20,7 @@ import {
 } from '@patternfly/react-core';
 import { useForm, Controller } from 'react-hook-form';
 import { DemoDefinition } from '../lib/types';
-import { createInstance } from '../lib/instances';
+import { createInstance, executeInstance, updateInstanceStatus } from '../lib/instances';
 import { loadConfig } from '../lib/config';
 
 interface LaunchModalProps {
@@ -43,14 +43,50 @@ export const LaunchModal: React.FC<LaunchModalProps> = ({ demo, isOpen, onClose 
     setLoading(true);
     setError(null);
 
+    let instanceId: string | null = null;
+
     try {
       const config = await loadConfig();
-      const instanceId = await createInstance(demo, data, config);
-      onClose();
-      window.location.reload();
+      instanceId = await createInstance(demo, data, config);
+      console.log('Instance created:', instanceId);
+
+      // Automatically execute the instance after creation
+      try {
+        await executeInstance(instanceId, (output) => {
+          console.log('Execution output:', output);
+        });
+        // Success - reload to show the instance
+        onClose();
+        window.location.reload();
+      } catch (execErr: any) {
+        // If execution fails, update instance status to failed and show in list
+        console.error('Failed to execute instance:', execErr);
+        const errorMessage = execErr?.message || execErr?.toString() || 'Execution failed';
+        const errorOutput = execErr?.message || 'Failed to start execution';
+
+        try {
+          await updateInstanceStatus(instanceId, {
+            state: 'failed',
+            error: errorMessage,
+            output: errorOutput,
+            completedAt: new Date().toISOString()
+          });
+          console.log('Instance status updated to failed:', instanceId);
+        } catch (statusErr: any) {
+          console.error('Failed to update instance status:', statusErr);
+          // Even if status update fails, try to show the instance
+        }
+
+        // Wait a bit to ensure status is written, then reload
+        setTimeout(() => {
+          onClose();
+          window.location.reload();
+        }, 500);
+      }
     } catch (err: any) {
+      console.error('Failed to create instance:', err);
+      // If instance creation failed, show error but don't reload
       setError(err.message || 'Failed to create instance');
-    } finally {
       setLoading(false);
     }
   };

@@ -510,6 +510,33 @@ function parseDemosYaml(content: string): DemoDefinition[] {
               currentParameter.options = options;
             }
           }
+        } else {
+          // Handle case where options: is on its own line, followed by list items
+          let j = i + 1;
+          const options: string[] = [];
+          const optionsIndent = indent;
+          while (j < lines.length) {
+            const optLine = lines[j];
+            const optIndent = optLine.length - optLine.trimStart().length;
+            const optTrimmed = optLine.trim();
+
+            // Stop if we hit a line with same or less indentation than options: (another property or end of parameter)
+            if (optIndent <= optionsIndent && optTrimmed !== '' && !optTrimmed.startsWith('-')) {
+              break;
+            }
+
+            // Only parse lines that start with '-' and are more indented than options:
+            if (optTrimmed.startsWith('-') && optIndent > optionsIndent) {
+              const optMatch = optTrimmed.match(/^-\s*(.+)/);
+              if (optMatch) {
+                options.push(optMatch[1].trim().replace(/['"]/g, ''));
+              }
+            }
+            j++;
+          }
+          if (options.length > 0) {
+            currentParameter.options = options;
+          }
         }
       } else if (trimmed.startsWith('default:')) {
         const defaultMatch = trimmed.match(/default:\s*(.+)/);
@@ -556,6 +583,11 @@ async function discoverRoleVariables(config: CatalogConfig, roleName: string): P
     getCockpit().file(roleDefaultsPath).read()
       .then((content: string) => {
         try {
+          if (!content || typeof content !== 'string') {
+            // File exists but is empty or invalid, return empty array
+            resolve([]);
+            return;
+          }
           const roleVars = parseRoleDefaults(content);
           resolve(roleVars);
         } catch (error: any) {
@@ -569,6 +601,9 @@ async function discoverRoleVariables(config: CatalogConfig, roleName: string): P
 }
 
 function parseRoleDefaults(content: string): RoleVariable[] {
+  if (!content || typeof content !== 'string') {
+    return [];
+  }
   const lines = content.split('\n');
   const variables: Map<string, RoleVariable> = new Map();
   let currentVar: string | null = null;
