@@ -1,3 +1,4 @@
+import { saveConfig } from './config';
 import { CatalogConfig, DemoDefinition, DemoParameter } from './types';
 
 declare global {
@@ -40,14 +41,16 @@ export interface GalaxyMetadata {
   collectionName: string;
 }
 
-export async function readManifestMetadata(collectionPath: string): Promise<GalaxyMetadata> {
+export async function readCollectionMetadata(collectionPath: string): Promise<GalaxyMetadata> {
   const cockpit = getCockpit();
   const manifestJsonPath = `${collectionPath}/MANIFEST.json`;
+  const galaxyYmlPath = `${collectionPath}/galaxy.yml`;
 
   // Retry mechanism for potential timing issues after installation
   const maxRetries = 3;
   const retryDelay = 500; // milliseconds
 
+  // Try MANIFEST.json first (for installed collections)
   console.log(`Attempting to read MANIFEST.json from: ${manifestJsonPath}`);
 
   for (let attempt = 0; attempt < maxRetries; attempt++) {
@@ -85,11 +88,67 @@ export async function readManifestMetadata(collectionPath: string): Promise<Gala
         await new Promise(resolve => setTimeout(resolve, retryDelay));
         continue;
       }
-      throw new Error(`Failed to read MANIFEST.json at ${manifestJsonPath}: ${error.message || 'File not found'}`);
+      // If MANIFEST.json read fails, fall through to try galaxy.yml
+      break;
     }
   }
 
-  throw new Error(`Failed to read MANIFEST.json at ${manifestJsonPath} after ${maxRetries} attempts`);
+  // Fallback to galaxy.yml (for source collections)
+  console.log(`MANIFEST.json not found, attempting to read galaxy.yml from: ${galaxyYmlPath}`);
+
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
+    try {
+      const content = await cockpit.file(galaxyYmlPath).read();
+
+      if (!content || content.trim() === '') {
+        if (attempt < maxRetries - 1) {
+          console.log(`galaxy.yml appears empty at ${galaxyYmlPath}, retrying in ${retryDelay}ms (attempt ${attempt + 1}/${maxRetries})`);
+          await new Promise(resolve => setTimeout(resolve, retryDelay));
+          continue;
+        }
+        console.error(`galaxy.yml file is empty at ${galaxyYmlPath} after ${maxRetries} attempts`);
+        throw new Error(`galaxy.yml file is empty or could not be read at ${galaxyYmlPath}`);
+      }
+
+      const lines = content.split('\n');
+      let namespace: string | null = null;
+      let collectionName: string | null = null;
+
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (trimmed.startsWith('namespace:')) {
+          const match = trimmed.match(/namespace:\s*(.+)/);
+          if (match) {
+            namespace = match[1].trim().replace(/['"]/g, '');
+          }
+        } else if (trimmed.startsWith('name:')) {
+          const match = trimmed.match(/name:\s*(.+)/);
+          if (match) {
+            collectionName = match[1].trim().replace(/['"]/g, '');
+          }
+        }
+
+        if (namespace && collectionName) {
+          break;
+        }
+      }
+
+      if (!namespace || !collectionName) {
+        throw new Error(`Failed to extract namespace or name from galaxy.yml at ${galaxyYmlPath}. Found namespace: ${namespace}, name: ${collectionName}`);
+      }
+
+      return { namespace, collectionName };
+    } catch (error: any) {
+      if (attempt < maxRetries - 1 && (error.message?.includes('not found') || error.message?.includes('empty'))) {
+        console.log(`Failed to read galaxy.yml at ${galaxyYmlPath}, retrying in ${retryDelay}ms (attempt ${attempt + 1}/${maxRetries}):`, error.message);
+        await new Promise(resolve => setTimeout(resolve, retryDelay));
+        continue;
+      }
+      throw new Error(`Failed to read collection metadata from ${collectionPath}. Tried MANIFEST.json and galaxy.yml: ${error.message || 'Files not found'}`);
+    }
+  }
+
+  throw new Error(`Failed to read collection metadata from ${collectionPath} after ${maxRetries} attempts. Neither MANIFEST.json nor galaxy.yml could be read.`);
 }
 
 async function findInstalledCollection(collectionsDir: string): Promise<{ namespace: string; collectionName: string; path: string } | null> {
@@ -246,7 +305,7 @@ async function extractCollectionMetadata(
   // If we have a collection path, read its metadata
   if (collectionPath) {
     try {
-      const metadata = await readManifestMetadata(collectionPath);
+      const metadata = await readCollectionMetadata(collectionPath);
       finalNamespace = metadata.namespace;
       finalCollectionName = metadata.collectionName;
     } catch (metadataError: any) {
@@ -284,7 +343,7 @@ export async function syncCatalog(config: CatalogConfig): Promise<SyncCatalogRes
     }
     await ensureAnsibleCfg();
 
-    const metadata = await readManifestMetadata(collectionPath);
+    const metadata = await readCollectionMetadata(collectionPath);
     return {
       success: true,
       output: `Collection found at: ${collectionPath} (namespace: ${metadata.namespace}, collection: ${metadata.collectionName})`,
@@ -385,10 +444,17 @@ export async function syncCatalog(config: CatalogConfig): Promise<SyncCatalogRes
             const hasSuccess = successIndicators.some(indicator => output.includes(indicator));
 
             if (hasSuccess || exitCode === 0) {
-              // Installation succeeded - now read MANIFEST.json to get namespace and collection name
+              // Installation succeeded - now extract metadata and cache it in config.json
               (async () => {
                 try {
                   const metadata = await extractCollectionMetadata(output, expectedNamespace, expectedCollectionName, collectionsDir, config);
+
+                  // Cache metadata in config.json
+                  if (metadata.namespace && metadata.collectionName) {
+                    const updatedConfig = { ...config, namespace: metadata.namespace, collectionName: metadata.collectionName };
+                    await saveConfig(updatedConfig);
+                  }
+
                   resolve({
                     success: true,
                     output: output + (metadata.namespace && metadata.collectionName ? `\n\nDetected namespace: ${metadata.namespace}, collection: ${metadata.collectionName}` : ''),
@@ -398,11 +464,18 @@ export async function syncCatalog(config: CatalogConfig): Promise<SyncCatalogRes
                   });
                 } catch (metadataError: any) {
                   // If we can't read metadata, still resolve as success since installation worked
-                  console.warn('Failed to read MANIFEST.json metadata:', metadataError);
+                  console.warn('Failed to read collection metadata:', metadataError);
                   const fallbackMetadata = await extractCollectionMetadata(output, expectedNamespace, expectedCollectionName, collectionsDir, config).catch(() => ({
                     namespace: expectedNamespace || config.namespace,
                     collectionName: expectedCollectionName || config.collectionName
                   }));
+
+                  // Cache fallback metadata in config.json if available
+                  if (fallbackMetadata.namespace && fallbackMetadata.collectionName) {
+                    const updatedConfig = { ...config, namespace: fallbackMetadata.namespace, collectionName: fallbackMetadata.collectionName };
+                    await saveConfig(updatedConfig).catch(err => console.warn('Failed to save fallback metadata to config:', err));
+                  }
+
                   resolve({
                     success: true,
                     output: output,
@@ -466,10 +539,17 @@ export async function syncCatalog(config: CatalogConfig): Promise<SyncCatalogRes
             const hasSuccess = successIndicators.some(indicator => output.includes(indicator));
 
             if (hasSuccess) {
-              // Try to read MANIFEST.json metadata
+              // Try to extract metadata and cache it in config.json
               (async () => {
                 try {
                   const metadata = await extractCollectionMetadata(output, expectedNamespace, expectedCollectionName, collectionsDir, config);
+
+                  // Cache metadata in config.json
+                  if (metadata.namespace && metadata.collectionName) {
+                    const updatedConfig = { ...config, namespace: metadata.namespace, collectionName: metadata.collectionName };
+                    await saveConfig(updatedConfig);
+                  }
+
                   resolve({
                     success: true,
                     output: output + (metadata.namespace && metadata.collectionName ? `\n\nDetected namespace: ${metadata.namespace}, collection: ${metadata.collectionName}` : ''),
@@ -478,11 +558,18 @@ export async function syncCatalog(config: CatalogConfig): Promise<SyncCatalogRes
                     collectionName: metadata.collectionName
                   });
                 } catch (metadataError: any) {
-                  console.warn('Failed to read MANIFEST.json metadata:', metadataError);
+                  console.warn('Failed to read collection metadata:', metadataError);
                   const fallbackMetadata = await extractCollectionMetadata(output, expectedNamespace, expectedCollectionName, collectionsDir, config).catch(() => ({
                     namespace: expectedNamespace || config.namespace,
                     collectionName: expectedCollectionName || config.collectionName
                   }));
+
+                  // Cache fallback metadata in config.json if available
+                  if (fallbackMetadata.namespace && fallbackMetadata.collectionName) {
+                    const updatedConfig = { ...config, namespace: fallbackMetadata.namespace, collectionName: fallbackMetadata.collectionName };
+                    await saveConfig(updatedConfig).catch(err => console.warn('Failed to save fallback metadata to config:', err));
+                  }
+
                   resolve({
                     success: true,
                     output: output,
@@ -518,10 +605,17 @@ export async function syncCatalog(config: CatalogConfig): Promise<SyncCatalogRes
               }
             });
 
-            // Try to read MANIFEST.json metadata
+            // Try to extract metadata and cache it in config.json
             (async () => {
               try {
                 const metadata = await extractCollectionMetadata(output, expectedNamespace, expectedCollectionName, collectionsDir, config);
+
+                // Cache metadata in config.json
+                if (metadata.namespace && metadata.collectionName) {
+                  const updatedConfig = { ...config, namespace: metadata.namespace, collectionName: metadata.collectionName };
+                  await saveConfig(updatedConfig);
+                }
+
                 resolve({
                   success: true,
                   output: output + (metadata.namespace && metadata.collectionName ? `\n\nDetected namespace: ${metadata.namespace}, collection: ${metadata.collectionName}` : ''),
@@ -530,11 +624,18 @@ export async function syncCatalog(config: CatalogConfig): Promise<SyncCatalogRes
                   collectionName: metadata.collectionName
                 });
               } catch (metadataError: any) {
-                console.warn('Failed to read MANIFEST.json metadata:', metadataError);
+                console.warn('Failed to read collection metadata:', metadataError);
                 const fallbackMetadata = await extractCollectionMetadata(output, expectedNamespace, expectedCollectionName, collectionsDir, config).catch(() => ({
                   namespace: expectedNamespace || config.namespace,
                   collectionName: expectedCollectionName || config.collectionName
                 }));
+
+                // Cache fallback metadata in config.json if available
+                if (fallbackMetadata.namespace && fallbackMetadata.collectionName) {
+                  const updatedConfig = { ...config, namespace: fallbackMetadata.namespace, collectionName: fallbackMetadata.collectionName };
+                  await saveConfig(updatedConfig).catch(err => console.warn('Failed to save fallback metadata to config:', err));
+                }
+
                 resolve({
                   success: true,
                   output: output,
@@ -591,14 +692,37 @@ export async function syncCatalog(config: CatalogConfig): Promise<SyncCatalogRes
 }
 
 export async function getDemos(config: CatalogConfig): Promise<DemoDefinition[]> {
-  if (!config.namespace || !config.collectionName) {
-    throw new Error('Namespace and collection name are required. Please sync the catalog first to derive them from MANIFEST.json.');
+  // Check config.json first for cached metadata
+  let namespace = config.namespace;
+  let collectionName = config.collectionName;
+
+  // If not in config, try to read from collection files
+  if (!namespace || !collectionName) {
+    const collectionPath = await findCollectionPath(namespace || '', collectionName || '');
+    if (collectionPath) {
+      try {
+        const metadata = await readCollectionMetadata(collectionPath);
+        namespace = metadata.namespace;
+        collectionName = metadata.collectionName;
+        // Cache in config for future use
+        const updatedConfig = { ...config, namespace, collectionName };
+        await saveConfig(updatedConfig);
+      } catch (error: any) {
+        throw new Error('Namespace and collection name are required. Please sync the catalog first to derive them from collection metadata.');
+      }
+    } else {
+      throw new Error('Namespace and collection name are required. Please sync the catalog first to derive them from collection metadata.');
+    }
   }
 
-  const collectionPath = await findCollectionPath(config.namespace, config.collectionName);
+  if (!namespace || !collectionName) {
+    throw new Error('Namespace and collection name are required. Please sync the catalog first to derive them from collection metadata.');
+  }
+
+  const collectionPath = await findCollectionPath(namespace, collectionName);
 
   if (!collectionPath) {
-    throw new Error(`Collection ${config.namespace}.${config.collectionName} not found. Please sync the catalog first.`);
+    throw new Error(`Collection ${namespace}.${collectionName} not found. Please sync the catalog first.`);
   }
 
   const demosYamlPath = `${collectionPath}/demos.yaml`;

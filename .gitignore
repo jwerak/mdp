@@ -3,3 +3,7 @@ cockpit/dist/
 *.log
 .DS_Store
 
+# Ansible collection build artifacts
+**/MANIFEST.json
+**/FILES.json
+
