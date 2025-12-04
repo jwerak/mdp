@@ -48,11 +48,18 @@ module.exports = {
           {
             loader: MiniCssExtractPlugin.loader,
             options: {
-              publicPath: 'dist/'
+              publicPath: './'
             }
           },
           'css-loader'
         ]
+      },
+      {
+        test: /\.(woff|woff2|eot|ttf|otf)$/i,
+        type: 'asset/resource',
+        generator: {
+          filename: '[name].[contenthash][ext]'
+        }
       }
     ]
   },

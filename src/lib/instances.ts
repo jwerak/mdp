@@ -343,7 +343,9 @@ export async function executeInstance(
   }
 
   // Prepare extra vars for meta playbook
-  const demoPath = instance.spec.playbook_path;
+  // Regenerate playbook_path from current config to ensure it uses correct namespace/collectionName
+  // This handles cases where config was updated after instance creation
+  const demoPath = await getPlaybookPath(config, instance.spec.demoType, instance.spec.demoPath);
 
   const extraVars = {
     instance_id: instanceId,
@@ -357,12 +359,12 @@ export async function executeInstance(
   // This ensures ansible-navigator can be found in common installation locations
   // Run ansible-navigator from BASE_PATH so it automatically mounts the working directory
   // ANSIBLE_CONFIG environment variable points to ansible.cfg which configures collections_paths
-  // Using absolute path that will be available inside the execution environment (mounted working directory)
+  // Using relative path since ansible-navigator mounts BASE_PATH as working directory
   // The ansible.cfg file configures collections_paths to include /var/lib/cockpit-plugin-demos/collections
   const ansibleNavigatorCmd = [
     'bash', '-c',
     `export PATH="/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin:$HOME/.local/bin:$PATH" && ` +
-    `export ANSIBLE_CONFIG="${BASE_PATH}/meta/ansible.cfg" && ` +
+    `export ANSIBLE_CONFIG="meta/ansible.cfg" && ` +
     `ansible-navigator run "meta/meta_playbook.yml" ` +
     `--eei "${config.executionEnvironment}" ` +
     `--extra-vars '${JSON.stringify(extraVars)}' ` +

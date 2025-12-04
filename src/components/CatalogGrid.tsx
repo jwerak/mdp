@@ -36,7 +36,7 @@ export const CatalogGrid: React.FC = () => {
         return;
       }
       if (!config.namespace || !config.collectionName) {
-        setError('Catalog not synchronized. Please sync the catalog first to derive namespace and collection name from galaxy.yml.');
+        setError('Catalog not synchronized. Please sync the catalog first to derive namespace and collection name from MANIFEST.json.');
         setLoading(false);
         return;
       }

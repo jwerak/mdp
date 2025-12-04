@@ -40,51 +40,56 @@ export interface GalaxyMetadata {
   collectionName: string;
 }
 
-export async function readGalaxyMetadata(collectionPath: string): Promise<GalaxyMetadata> {
+export async function readManifestMetadata(collectionPath: string): Promise<GalaxyMetadata> {
   const cockpit = getCockpit();
-  const galaxyYmlPath = `${collectionPath}/galaxy.yml`;
+  const manifestJsonPath = `${collectionPath}/MANIFEST.json`;
 
-  return new Promise((resolve, reject) => {
-    cockpit.file(galaxyYmlPath).read()
-      .then((content: string) => {
-        try {
-          const lines = content.split('\n');
-          let namespace: string | null = null;
-          let collectionName: string | null = null;
+  // Retry mechanism for potential timing issues after installation
+  const maxRetries = 3;
+  const retryDelay = 500; // milliseconds
 
-          for (const line of lines) {
-            const trimmed = line.trim();
-            if (trimmed.startsWith('namespace:')) {
-              const match = trimmed.match(/namespace:\s*(.+)/);
-              if (match) {
-                namespace = match[1].trim().replace(/['"]/g, '');
-              }
-            } else if (trimmed.startsWith('name:')) {
-              const match = trimmed.match(/name:\s*(.+)/);
-              if (match) {
-                collectionName = match[1].trim().replace(/['"]/g, '');
-              }
-            }
+  console.log(`Attempting to read MANIFEST.json from: ${manifestJsonPath}`);
 
-            if (namespace && collectionName) {
-              break;
-            }
-          }
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
+    try {
+      const content = await cockpit.file(manifestJsonPath).read();
 
-          if (!namespace || !collectionName) {
-            reject(new Error(`Failed to extract namespace or name from galaxy.yml. Found namespace: ${namespace}, name: ${collectionName}`));
-            return;
-          }
-
-          resolve({ namespace, collectionName });
-        } catch (error: any) {
-          reject(new Error(`Failed to parse galaxy.yml: ${error.message}`));
+      if (!content || content.trim() === '') {
+        if (attempt < maxRetries - 1) {
+          console.log(`MANIFEST.json appears empty at ${manifestJsonPath}, retrying in ${retryDelay}ms (attempt ${attempt + 1}/${maxRetries})`);
+          await new Promise(resolve => setTimeout(resolve, retryDelay));
+          continue;
         }
-      })
-      .catch((error: any) => {
-        reject(new Error(`Failed to read galaxy.yml: ${error.message || 'File not found'}`));
-      });
-  });
+        console.error(`MANIFEST.json file is empty at ${manifestJsonPath} after ${maxRetries} attempts`);
+        throw new Error(`MANIFEST.json file is empty or could not be read at ${manifestJsonPath}`);
+      }
+
+      const manifest = JSON.parse(content);
+      const collectionInfo = manifest.collection_info;
+
+      if (!collectionInfo) {
+        throw new Error(`MANIFEST.json missing collection_info object at ${manifestJsonPath}`);
+      }
+
+      const namespace = collectionInfo.namespace;
+      const collectionName = collectionInfo.name;
+
+      if (!namespace || !collectionName) {
+        throw new Error(`Failed to extract namespace or name from MANIFEST.json at ${manifestJsonPath}. Found namespace: ${namespace}, name: ${collectionName}`);
+      }
+
+      return { namespace, collectionName };
+    } catch (error: any) {
+      if (attempt < maxRetries - 1 && (error.message?.includes('not found') || error.message?.includes('empty') || error.message?.includes('Unexpected token'))) {
+        console.log(`Failed to read MANIFEST.json at ${manifestJsonPath}, retrying in ${retryDelay}ms (attempt ${attempt + 1}/${maxRetries}):`, error.message);
+        await new Promise(resolve => setTimeout(resolve, retryDelay));
+        continue;
+      }
+      throw new Error(`Failed to read MANIFEST.json at ${manifestJsonPath}: ${error.message || 'File not found'}`);
+    }
+  }
+
+  throw new Error(`Failed to read MANIFEST.json at ${manifestJsonPath} after ${maxRetries} attempts`);
 }
 
 async function findInstalledCollection(collectionsDir: string): Promise<{ namespace: string; collectionName: string; path: string } | null> {
@@ -94,21 +99,21 @@ async function findInstalledCollection(collectionsDir: string): Promise<{ namesp
   try {
     // List all namespaces
     const namespaces = await new Promise<string[]>((resolve, reject) => {
-      cockpit.spawn(['bash', '-c', `find "${ansibleCollectionsPath}" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | xargs -n1 basename`], { err: 'out' })
-        .then((process: any) => {
-          let output = '';
-          process.stream((data: string) => {
-            output += data;
-          });
-          if (typeof process.done === 'function') {
-            process.done(() => {
-              resolve(output.trim().split('\n').filter(n => n));
-            });
-          } else {
-            process.then(() => resolve(output.trim().split('\n').filter(n => n))).catch(reject);
-          }
-        })
-        .catch(() => resolve([]));
+      const process = cockpit.spawn(['bash', '-c', `find "${ansibleCollectionsPath}" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | xargs -n1 basename`], { err: 'out' });
+      let output = '';
+      process.stream((data: string) => {
+        output += data;
+      });
+      if (typeof (process as any).done === 'function') {
+        (process as any).done(() => {
+          resolve(output.trim().split('\n').filter(n => n));
+        });
+      } else {
+        process.then(() => resolve(output.trim().split('\n').filter(n => n))).catch(reject);
+      }
+      if (typeof (process as any).fail === 'function') {
+        (process as any).fail(() => resolve([]));
+      }
     });
 
     // For each namespace, find collections
@@ -116,28 +121,28 @@ async function findInstalledCollection(collectionsDir: string): Promise<{ namesp
       const namespacePath = `${ansibleCollectionsPath}/${namespace}`;
       try {
         const collections = await new Promise<string[]>((resolve, reject) => {
-          cockpit.spawn(['bash', '-c', `find "${namespacePath}" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | xargs -n1 basename`], { err: 'out' })
-            .then((process: any) => {
-              let output = '';
-              process.stream((data: string) => {
-                output += data;
-              });
-              if (typeof process.done === 'function') {
-                process.done(() => {
-                  resolve(output.trim().split('\n').filter(n => n));
-                });
-              } else {
-                process.then(() => resolve(output.trim().split('\n').filter(n => n))).catch(reject);
-              }
-            })
-            .catch(() => resolve([]));
+          const process = cockpit.spawn(['bash', '-c', `find "${namespacePath}" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | xargs -n1 basename`], { err: 'out' });
+          let output = '';
+          process.stream((data: string) => {
+            output += data;
+          });
+          if (typeof (process as any).done === 'function') {
+            (process as any).done(() => {
+              resolve(output.trim().split('\n').filter(n => n));
+            });
+          } else {
+            process.then(() => resolve(output.trim().split('\n').filter(n => n))).catch(reject);
+          }
+          if (typeof (process as any).fail === 'function') {
+            (process as any).fail(() => resolve([]));
+          }
         });
 
         for (const collectionName of collections) {
           const collectionPath = `${namespacePath}/${collectionName}`;
           try {
-            // Check if galaxy.yml exists
-            await cockpit.file(`${collectionPath}/galaxy.yml`).read();
+            // Check if MANIFEST.json exists
+            await cockpit.file(`${collectionPath}/MANIFEST.json`).read();
             return { namespace, collectionName, path: collectionPath };
           } catch {
             continue;
@@ -186,8 +191,8 @@ export async function findCollectionPath(namespace: string, collectionName: stri
 
   for (const path of searchPaths) {
     try {
-      const galaxyYmlPath = `${path}/galaxy.yml`;
-      await cockpit.file(galaxyYmlPath).read();
+      const manifestJsonPath = `${path}/MANIFEST.json`;
+      await cockpit.file(manifestJsonPath).read();
       return path;
     } catch {
       continue;
@@ -204,6 +209,70 @@ export interface SyncCatalogResult {
   collectionName?: string;
 }
 
+async function extractCollectionMetadata(
+  output: string,
+  expectedNamespace: string | undefined,
+  expectedCollectionName: string | undefined,
+  collectionsDir: string,
+  config: CatalogConfig
+): Promise<{ namespace?: string; collectionName?: string }> {
+  let finalNamespace = expectedNamespace;
+  let finalCollectionName = expectedCollectionName;
+  let collectionPath: string | null = null;
+
+  // First, try to parse the installation path from ansible-galaxy output
+  // Look for lines like "Installing 'namespace.collection:version' to '/path/to/collection'"
+  const installPathMatch = output.match(/Installing\s+['"]([^'"]+)['"]\s+to\s+['"]([^'"]+)['"]/);
+  if (installPathMatch && installPathMatch[2]) {
+    collectionPath = installPathMatch[2];
+    console.log(`Parsed installation path from output: ${collectionPath}`);
+  }
+
+  // Try to find the installed collection and read its MANIFEST.json
+  if (expectedNamespace && expectedCollectionName) {
+    // If we have expected values, try to find the collection path
+    const foundPath = await findCollectionPath(expectedNamespace, expectedCollectionName);
+    if (foundPath) {
+      collectionPath = foundPath;
+    }
+  } else if (!collectionPath) {
+    // For git+ URLs or when we don't have namespace/collectionName, search for installed collection
+    const installed = await findInstalledCollection(collectionsDir);
+    if (installed) {
+      collectionPath = installed.path;
+    }
+  }
+
+  // If we have a collection path, read its metadata
+  if (collectionPath) {
+    try {
+      const metadata = await readManifestMetadata(collectionPath);
+      finalNamespace = metadata.namespace;
+      finalCollectionName = metadata.collectionName;
+    } catch (metadataError: any) {
+      console.warn(`Failed to read metadata from ${collectionPath}, trying fallback:`, metadataError);
+      // If reading metadata fails, try to extract namespace/collection from path
+      const pathMatch = collectionPath.match(/ansible_collections\/([^/]+)\/([^/]+)$/);
+      if (pathMatch) {
+        finalNamespace = pathMatch[1];
+        finalCollectionName = pathMatch[2];
+        console.log(`Extracted namespace/collection from path: ${finalNamespace}.${finalCollectionName}`);
+      }
+    }
+  }
+
+  // Only fall back to config values if we still don't have namespace/collection
+  if (!finalNamespace || !finalCollectionName) {
+    if (config.namespace && config.collectionName) {
+      console.warn(`Using fallback config values: ${config.namespace}.${config.collectionName}`);
+      finalNamespace = config.namespace;
+      finalCollectionName = config.collectionName;
+    }
+  }
+
+  return { namespace: finalNamespace, collectionName: finalCollectionName };
+}
+
 export async function syncCatalog(config: CatalogConfig): Promise<SyncCatalogResult> {
   if (config.useLocalCollection) {
     if (!config.namespace || !config.collectionName) {
@@ -215,7 +284,7 @@ export async function syncCatalog(config: CatalogConfig): Promise<SyncCatalogRes
     }
     await ensureAnsibleCfg();
 
-    const metadata = await readGalaxyMetadata(collectionPath);
+    const metadata = await readManifestMetadata(collectionPath);
     return {
       success: true,
       output: `Collection found at: ${collectionPath} (namespace: ${metadata.namespace}, collection: ${metadata.collectionName})`,
@@ -316,54 +385,30 @@ export async function syncCatalog(config: CatalogConfig): Promise<SyncCatalogRes
             const hasSuccess = successIndicators.some(indicator => output.includes(indicator));
 
             if (hasSuccess || exitCode === 0) {
-              // Installation succeeded - now read galaxy.yml to get namespace and collection name
+              // Installation succeeded - now read MANIFEST.json to get namespace and collection name
               (async () => {
                 try {
-                  let finalNamespace = expectedNamespace;
-                  let finalCollectionName = expectedCollectionName;
-
-                  // Try to find the installed collection and read its galaxy.yml
-                  if (expectedNamespace && expectedCollectionName) {
-                    const collectionPath = await findCollectionPath(expectedNamespace, expectedCollectionName);
-                    if (collectionPath) {
-                      const metadata = await readGalaxyMetadata(collectionPath);
-                      finalNamespace = metadata.namespace;
-                      finalCollectionName = metadata.collectionName;
-                    }
-                  } else {
-                    // For git+ URLs or when we don't have namespace/collectionName, search for installed collection
-                    const installed = await findInstalledCollection(collectionsDir);
-                    if (installed) {
-                      const metadata = await readGalaxyMetadata(installed.path);
-                      finalNamespace = metadata.namespace;
-                      finalCollectionName = metadata.collectionName;
-                    } else if (config.namespace && config.collectionName) {
-                      // Fallback to config values if available
-                      const collectionPath = await findCollectionPath(config.namespace, config.collectionName);
-                      if (collectionPath) {
-                        const metadata = await readGalaxyMetadata(collectionPath);
-                        finalNamespace = metadata.namespace;
-                        finalCollectionName = metadata.collectionName;
-                      }
-                    }
-                  }
-
+                  const metadata = await extractCollectionMetadata(output, expectedNamespace, expectedCollectionName, collectionsDir, config);
                   resolve({
                     success: true,
-                    output: output + (finalNamespace && finalCollectionName ? `\n\nDetected namespace: ${finalNamespace}, collection: ${finalCollectionName}` : ''),
+                    output: output + (metadata.namespace && metadata.collectionName ? `\n\nDetected namespace: ${metadata.namespace}, collection: ${metadata.collectionName}` : ''),
                     warnings: warnings,
-                    namespace: finalNamespace,
-                    collectionName: finalCollectionName
+                    namespace: metadata.namespace,
+                    collectionName: metadata.collectionName
                   });
                 } catch (metadataError: any) {
                   // If we can't read metadata, still resolve as success since installation worked
-                  console.warn('Failed to read galaxy.yml metadata:', metadataError);
+                  console.warn('Failed to read MANIFEST.json metadata:', metadataError);
+                  const fallbackMetadata = await extractCollectionMetadata(output, expectedNamespace, expectedCollectionName, collectionsDir, config).catch(() => ({
+                    namespace: expectedNamespace || config.namespace,
+                    collectionName: expectedCollectionName || config.collectionName
+                  }));
                   resolve({
                     success: true,
                     output: output,
                     warnings: warnings,
-                    namespace: expectedNamespace || config.namespace,
-                    collectionName: expectedCollectionName || config.collectionName
+                    namespace: fallbackMetadata.namespace,
+                    collectionName: fallbackMetadata.collectionName
                   });
                 }
               })();
@@ -421,52 +466,29 @@ export async function syncCatalog(config: CatalogConfig): Promise<SyncCatalogRes
             const hasSuccess = successIndicators.some(indicator => output.includes(indicator));
 
             if (hasSuccess) {
-              // Try to read galaxy.yml metadata
+              // Try to read MANIFEST.json metadata
               (async () => {
                 try {
-                  let finalNamespace = expectedNamespace;
-                  let finalCollectionName = expectedCollectionName;
-
-                  if (expectedNamespace && expectedCollectionName) {
-                    const collectionPath = await findCollectionPath(expectedNamespace, expectedCollectionName);
-                    if (collectionPath) {
-                      const metadata = await readGalaxyMetadata(collectionPath);
-                      finalNamespace = metadata.namespace;
-                      finalCollectionName = metadata.collectionName;
-                    }
-                  } else {
-                    // For git+ URLs or when we don't have namespace/collectionName, search for installed collection
-                    const installed = await findInstalledCollection(collectionsDir);
-                    if (installed) {
-                      const metadata = await readGalaxyMetadata(installed.path);
-                      finalNamespace = metadata.namespace;
-                      finalCollectionName = metadata.collectionName;
-                    } else if (config.namespace && config.collectionName) {
-                      // Fallback to config values if available
-                      const collectionPath = await findCollectionPath(config.namespace, config.collectionName);
-                      if (collectionPath) {
-                        const metadata = await readGalaxyMetadata(collectionPath);
-                        finalNamespace = metadata.namespace;
-                        finalCollectionName = metadata.collectionName;
-                      }
-                    }
-                  }
-
+                  const metadata = await extractCollectionMetadata(output, expectedNamespace, expectedCollectionName, collectionsDir, config);
                   resolve({
                     success: true,
-                    output: output + (finalNamespace && finalCollectionName ? `\n\nDetected namespace: ${finalNamespace}, collection: ${finalCollectionName}` : ''),
+                    output: output + (metadata.namespace && metadata.collectionName ? `\n\nDetected namespace: ${metadata.namespace}, collection: ${metadata.collectionName}` : ''),
                     warnings: warnings,
-                    namespace: finalNamespace,
-                    collectionName: finalCollectionName
+                    namespace: metadata.namespace,
+                    collectionName: metadata.collectionName
                   });
                 } catch (metadataError: any) {
-                  console.warn('Failed to read galaxy.yml metadata:', metadataError);
+                  console.warn('Failed to read MANIFEST.json metadata:', metadataError);
+                  const fallbackMetadata = await extractCollectionMetadata(output, expectedNamespace, expectedCollectionName, collectionsDir, config).catch(() => ({
+                    namespace: expectedNamespace || config.namespace,
+                    collectionName: expectedCollectionName || config.collectionName
+                  }));
                   resolve({
                     success: true,
                     output: output,
                     warnings: warnings,
-                    namespace: expectedNamespace || config.namespace,
-                    collectionName: expectedCollectionName || config.collectionName
+                    namespace: fallbackMetadata.namespace,
+                    collectionName: fallbackMetadata.collectionName
                   });
                 }
               })();
@@ -496,52 +518,29 @@ export async function syncCatalog(config: CatalogConfig): Promise<SyncCatalogRes
               }
             });
 
-            // Try to read galaxy.yml metadata
+            // Try to read MANIFEST.json metadata
             (async () => {
               try {
-                let finalNamespace = expectedNamespace;
-                let finalCollectionName = expectedCollectionName;
-
-                if (expectedNamespace && expectedCollectionName) {
-                  const collectionPath = await findCollectionPath(expectedNamespace, expectedCollectionName);
-                  if (collectionPath) {
-                    const metadata = await readGalaxyMetadata(collectionPath);
-                    finalNamespace = metadata.namespace;
-                    finalCollectionName = metadata.collectionName;
-                  }
-                } else {
-                  // For git+ URLs or when we don't have namespace/collectionName, search for installed collection
-                  const installed = await findInstalledCollection(collectionsDir);
-                  if (installed) {
-                    const metadata = await readGalaxyMetadata(installed.path);
-                    finalNamespace = metadata.namespace;
-                    finalCollectionName = metadata.collectionName;
-                  } else if (config.namespace && config.collectionName) {
-                    // Fallback to config values if available
-                    const collectionPath = await findCollectionPath(config.namespace, config.collectionName);
-                    if (collectionPath) {
-                      const metadata = await readGalaxyMetadata(collectionPath);
-                      finalNamespace = metadata.namespace;
-                      finalCollectionName = metadata.collectionName;
-                    }
-                  }
-                }
-
+                const metadata = await extractCollectionMetadata(output, expectedNamespace, expectedCollectionName, collectionsDir, config);
                 resolve({
                   success: true,
-                  output: output + (finalNamespace && finalCollectionName ? `\n\nDetected namespace: ${finalNamespace}, collection: ${finalCollectionName}` : ''),
+                  output: output + (metadata.namespace && metadata.collectionName ? `\n\nDetected namespace: ${metadata.namespace}, collection: ${metadata.collectionName}` : ''),
                   warnings: warnings,
-                  namespace: finalNamespace,
-                  collectionName: finalCollectionName
+                  namespace: metadata.namespace,
+                  collectionName: metadata.collectionName
                 });
               } catch (metadataError: any) {
-                console.warn('Failed to read galaxy.yml metadata:', metadataError);
+                console.warn('Failed to read MANIFEST.json metadata:', metadataError);
+                const fallbackMetadata = await extractCollectionMetadata(output, expectedNamespace, expectedCollectionName, collectionsDir, config).catch(() => ({
+                  namespace: expectedNamespace || config.namespace,
+                  collectionName: expectedCollectionName || config.collectionName
+                }));
                 resolve({
                   success: true,
                   output: output,
                   warnings: warnings,
-                  namespace: expectedNamespace || config.namespace,
-                  collectionName: expectedCollectionName || config.collectionName
+                  namespace: fallbackMetadata.namespace,
+                  collectionName: fallbackMetadata.collectionName
                 });
               }
             })();
@@ -593,7 +592,7 @@ export async function syncCatalog(config: CatalogConfig): Promise<SyncCatalogRes
 
 export async function getDemos(config: CatalogConfig): Promise<DemoDefinition[]> {
   if (!config.namespace || !config.collectionName) {
-    throw new Error('Namespace and collection name are required. Please sync the catalog first to derive them from galaxy.yml.');
+    throw new Error('Namespace and collection name are required. Please sync the catalog first to derive them from MANIFEST.json.');
   }
 
   const collectionPath = await findCollectionPath(config.namespace, config.collectionName);
@@ -790,7 +789,7 @@ function parseDemosYaml(content: string): DemoDefinition[] {
 
 export async function getCatalogPath(config: CatalogConfig): Promise<string> {
   if (!config.namespace || !config.collectionName) {
-    throw new Error('Namespace and collection name are required. Please sync the catalog first to derive them from galaxy.yml.');
+    throw new Error('Namespace and collection name are required. Please sync the catalog first to derive them from MANIFEST.json.');
   }
 
   const path = await findCollectionPath(config.namespace, config.collectionName);

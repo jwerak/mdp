@@ -3,7 +3,7 @@ demos:
     name: Hello World Demo
     description: A simple demo that prints variables and saves status with transformed values
     type: role
-    path: test
+    path: hello
     parameters:
       - name: greeting
         label: Greeting Message
