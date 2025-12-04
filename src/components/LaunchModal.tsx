@@ -1,27 +1,27 @@
-import React, { useState } from 'react';
 import {
-  Modal,
-  ModalVariant,
-  ModalBody,
-  ModalFooter,
+  Alert,
   Button,
+  Checkbox,
   Form,
   FormGroup,
-  TextInput,
-  NumberInput,
-  Checkbox,
-  Select,
-  SelectOption,
-  SelectList,
-  MenuToggle,
-  Alert,
   HelperText,
-  HelperTextItem
+  HelperTextItem,
+  MenuToggle,
+  Modal,
+  ModalBody,
+  ModalFooter,
+  ModalVariant,
+  NumberInput,
+  Select,
+  SelectList,
+  SelectOption,
+  TextInput
 } from '@patternfly/react-core';
-import { useForm, Controller } from 'react-hook-form';
-import { DemoDefinition } from '../lib/types';
-import { createInstance, executeInstance, updateInstanceStatus } from '../lib/instances';
+import React, { useState } from 'react';
+import { Controller, useForm } from 'react-hook-form';
 import { loadConfig } from '../lib/config';
+import { createInstance, executeInstance, updateInstanceStatus } from '../lib/instances';
+import { DemoDefinition } from '../lib/types';
 
 interface LaunchModalProps {
   demo: DemoDefinition;
@@ -259,12 +259,14 @@ export const LaunchModal: React.FC<LaunchModalProps> = ({ demo, isOpen, onClose 
       onClose={onClose}
     >
       <ModalBody>
-        <Form>
-          {error && (
-            <Alert variant="danger" title={error} isInline style={{ marginBottom: '1rem' }} />
-          )}
-          {demo.parameters.map((param, index) => renderParameterInput(param, index))}
-        </Form>
+        <div style={{ overflowY: 'auto', maxHeight: 'calc(100vh - 250px)' }}>
+          <Form>
+            {error && (
+              <Alert variant="danger" title={error} isInline style={{ marginBottom: '1rem' }} />
+            )}
+            {demo.parameters.map((param, index) => renderParameterInput(param, index))}
+          </Form>
+        </div>
       </ModalBody>
       <ModalFooter>
         <Button

@@ -17,8 +17,6 @@ const CONFIG_PATH = '/var/lib/cockpit-plugin-demos/config.json';
 
 const DEFAULT_CONFIG: CatalogConfig = {
   collectionSource: '',
-  namespace: 'local',
-  collectionName: '',
   executionEnvironment: '',
   useLocalCollection: false
 };

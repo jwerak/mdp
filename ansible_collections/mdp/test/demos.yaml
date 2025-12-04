@@ -1,9 +1,9 @@
 demos:
-  - id: hello-world
+  - id: test
     name: Hello World Demo
     description: A simple demo that prints variables and saves status with transformed values
     type: role
-    path: hello-world
+    path: test
     parameters:
       - name: greeting
         label: Greeting Message

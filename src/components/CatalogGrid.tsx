@@ -30,8 +30,13 @@ export const CatalogGrid: React.FC = () => {
     setError(null);
     try {
       const config = await loadConfig();
-      if ((!config.useLocalCollection && !config.collectionSource) || !config.collectionName) {
+      if (!config.useLocalCollection && !config.collectionSource) {
         setError('Please configure catalog settings first');
+        setLoading(false);
+        return;
+      }
+      if (!config.namespace || !config.collectionName) {
+        setError('Catalog not synchronized. Please sync the catalog first to derive namespace and collection name from galaxy.yml.');
         setLoading(false);
         return;
       }

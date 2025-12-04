@@ -18,7 +18,7 @@ const COLLECTIONS_PATH = `${BASE_PATH}/collections/ansible_collections`;
 const META_PATH = `${BASE_PATH}/meta`;
 const ANSIBLE_CFG_PATH = `${META_PATH}/ansible.cfg`;
 
-async function ensureAnsibleCfg(): Promise<void> {
+export async function ensureAnsibleCfg(): Promise<void> {
   return new Promise((resolve, reject) => {
     const cockpit = getCockpit();
     cockpit.file(ANSIBLE_CFG_PATH).read()
@@ -33,6 +33,125 @@ collections_paths = /var/lib/cockpit-plugin-demos/collections:~/.ansible/collect
           .catch((error: any) => reject(error));
       });
   });
+}
+
+export interface GalaxyMetadata {
+  namespace: string;
+  collectionName: string;
+}
+
+export async function readGalaxyMetadata(collectionPath: string): Promise<GalaxyMetadata> {
+  const cockpit = getCockpit();
+  const galaxyYmlPath = `${collectionPath}/galaxy.yml`;
+
+  return new Promise((resolve, reject) => {
+    cockpit.file(galaxyYmlPath).read()
+      .then((content: string) => {
+        try {
+          const lines = content.split('\n');
+          let namespace: string | null = null;
+          let collectionName: string | null = null;
+
+          for (const line of lines) {
+            const trimmed = line.trim();
+            if (trimmed.startsWith('namespace:')) {
+              const match = trimmed.match(/namespace:\s*(.+)/);
+              if (match) {
+                namespace = match[1].trim().replace(/['"]/g, '');
+              }
+            } else if (trimmed.startsWith('name:')) {
+              const match = trimmed.match(/name:\s*(.+)/);
+              if (match) {
+                collectionName = match[1].trim().replace(/['"]/g, '');
+              }
+            }
+
+            if (namespace && collectionName) {
+              break;
+            }
+          }
+
+          if (!namespace || !collectionName) {
+            reject(new Error(`Failed to extract namespace or name from galaxy.yml. Found namespace: ${namespace}, name: ${collectionName}`));
+            return;
+          }
+
+          resolve({ namespace, collectionName });
+        } catch (error: any) {
+          reject(new Error(`Failed to parse galaxy.yml: ${error.message}`));
+        }
+      })
+      .catch((error: any) => {
+        reject(new Error(`Failed to read galaxy.yml: ${error.message || 'File not found'}`));
+      });
+  });
+}
+
+async function findInstalledCollection(collectionsDir: string): Promise<{ namespace: string; collectionName: string; path: string } | null> {
+  const cockpit = getCockpit();
+  const ansibleCollectionsPath = `${collectionsDir}/ansible_collections`;
+
+  try {
+    // List all namespaces
+    const namespaces = await new Promise<string[]>((resolve, reject) => {
+      cockpit.spawn(['bash', '-c', `find "${ansibleCollectionsPath}" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | xargs -n1 basename`], { err: 'out' })
+        .then((process: any) => {
+          let output = '';
+          process.stream((data: string) => {
+            output += data;
+          });
+          if (typeof process.done === 'function') {
+            process.done(() => {
+              resolve(output.trim().split('\n').filter(n => n));
+            });
+          } else {
+            process.then(() => resolve(output.trim().split('\n').filter(n => n))).catch(reject);
+          }
+        })
+        .catch(() => resolve([]));
+    });
+
+    // For each namespace, find collections
+    for (const namespace of namespaces) {
+      const namespacePath = `${ansibleCollectionsPath}/${namespace}`;
+      try {
+        const collections = await new Promise<string[]>((resolve, reject) => {
+          cockpit.spawn(['bash', '-c', `find "${namespacePath}" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | xargs -n1 basename`], { err: 'out' })
+            .then((process: any) => {
+              let output = '';
+              process.stream((data: string) => {
+                output += data;
+              });
+              if (typeof process.done === 'function') {
+                process.done(() => {
+                  resolve(output.trim().split('\n').filter(n => n));
+                });
+              } else {
+                process.then(() => resolve(output.trim().split('\n').filter(n => n))).catch(reject);
+              }
+            })
+            .catch(() => resolve([]));
+        });
+
+        for (const collectionName of collections) {
+          const collectionPath = `${namespacePath}/${collectionName}`;
+          try {
+            // Check if galaxy.yml exists
+            await cockpit.file(`${collectionPath}/galaxy.yml`).read();
+            return { namespace, collectionName, path: collectionPath };
+          } catch {
+            continue;
+          }
+        }
+      } catch {
+        continue;
+      }
+    }
+  } catch {
+    // If listing fails, try a simpler approach: check if we have expected values
+  }
+
+  return null;
 }
 
 export async function findCollectionPath(namespace: string, collectionName: string): Promise<string | null> {
@@ -81,19 +200,28 @@ export interface SyncCatalogResult {
   success: boolean;
   output: string;
   warnings: string[];
+  namespace?: string;
+  collectionName?: string;
 }
 
 export async function syncCatalog(config: CatalogConfig): Promise<SyncCatalogResult> {
   if (config.useLocalCollection) {
+    if (!config.namespace || !config.collectionName) {
+      throw new Error('Namespace and collection name are required when using local collection. Please configure catalog first.');
+    }
     const collectionPath = await findCollectionPath(config.namespace, config.collectionName);
     if (!collectionPath) {
       throw new Error(`Collection ${config.namespace}.${config.collectionName} not found in local Ansible collection paths`);
     }
     await ensureAnsibleCfg();
+
+    const metadata = await readGalaxyMetadata(collectionPath);
     return {
       success: true,
-      output: `Collection found at: ${collectionPath}`,
-      warnings: []
+      output: `Collection found at: ${collectionPath} (namespace: ${metadata.namespace}, collection: ${metadata.collectionName})`,
+      warnings: [],
+      namespace: metadata.namespace,
+      collectionName: metadata.collectionName
     };
   }
 
@@ -108,9 +236,28 @@ export async function syncCatalog(config: CatalogConfig): Promise<SyncCatalogRes
   await ensureAnsibleCfg();
 
   const collectionsDir = `${BASE_PATH}/collections`;
-  const collectionSpec = config.collectionSource.startsWith('git+')
-    ? config.collectionSource
-    : `${config.namespace}.${config.collectionName}`;
+
+  let collectionSpec: string;
+  let expectedNamespace: string | undefined;
+  let expectedCollectionName: string | undefined;
+
+  if (config.collectionSource.startsWith('git+')) {
+    collectionSpec = config.collectionSource;
+  } else {
+    const parts = config.collectionSource.split('.');
+    if (parts.length === 2) {
+      expectedNamespace = parts[0];
+      expectedCollectionName = parts[1];
+      collectionSpec = config.collectionSource;
+    } else {
+      if (!config.namespace || !config.collectionName) {
+        throw new Error('Invalid collection source format. Expected "namespace.collection" or Git URL.');
+      }
+      collectionSpec = `${config.namespace}.${config.collectionName}`;
+      expectedNamespace = config.namespace;
+      expectedCollectionName = config.collectionName;
+    }
+  }
 
   return new Promise((resolve, reject) => {
     const cockpit = getCockpit();
@@ -168,20 +315,58 @@ export async function syncCatalog(config: CatalogConfig): Promise<SyncCatalogRes
             const successIndicators = ['was installed successfully', 'Installed successfully'];
             const hasSuccess = successIndicators.some(indicator => output.includes(indicator));
 
-            if (hasSuccess) {
-              // Installation succeeded, even if exit code is non-zero
-              resolve({
-                success: true,
-                output: output,
-                warnings: warnings
-              });
-            } else if (exitCode === 0) {
-              // Exit code is 0 but no clear success indicator - still treat as success
-              resolve({
-                success: true,
-                output: output,
-                warnings: warnings
-              });
+            if (hasSuccess || exitCode === 0) {
+              // Installation succeeded - now read galaxy.yml to get namespace and collection name
+              (async () => {
+                try {
+                  let finalNamespace = expectedNamespace;
+                  let finalCollectionName = expectedCollectionName;
+
+                  // Try to find the installed collection and read its galaxy.yml
+                  if (expectedNamespace && expectedCollectionName) {
+                    const collectionPath = await findCollectionPath(expectedNamespace, expectedCollectionName);
+                    if (collectionPath) {
+                      const metadata = await readGalaxyMetadata(collectionPath);
+                      finalNamespace = metadata.namespace;
+                      finalCollectionName = metadata.collectionName;
+                    }
+                  } else {
+                    // For git+ URLs or when we don't have namespace/collectionName, search for installed collection
+                    const installed = await findInstalledCollection(collectionsDir);
+                    if (installed) {
+                      const metadata = await readGalaxyMetadata(installed.path);
+                      finalNamespace = metadata.namespace;
+                      finalCollectionName = metadata.collectionName;
+                    } else if (config.namespace && config.collectionName) {
+                      // Fallback to config values if available
+                      const collectionPath = await findCollectionPath(config.namespace, config.collectionName);
+                      if (collectionPath) {
+                        const metadata = await readGalaxyMetadata(collectionPath);
+                        finalNamespace = metadata.namespace;
+                        finalCollectionName = metadata.collectionName;
+                      }
+                    }
+                  }
+
+                  resolve({
+                    success: true,
+                    output: output + (finalNamespace && finalCollectionName ? `\n\nDetected namespace: ${finalNamespace}, collection: ${finalCollectionName}` : ''),
+                    warnings: warnings,
+                    namespace: finalNamespace,
+                    collectionName: finalCollectionName
+                  });
+                } catch (metadataError: any) {
+                  // If we can't read metadata, still resolve as success since installation worked
+                  console.warn('Failed to read galaxy.yml metadata:', metadataError);
+                  resolve({
+                    success: true,
+                    output: output,
+                    warnings: warnings,
+                    namespace: expectedNamespace || config.namespace,
+                    collectionName: expectedCollectionName || config.collectionName
+                  });
+                }
+              })();
             } else {
               // No success indicators and non-zero exit code - treat as failure
               const errorMsg = output || `Collection installation failed with exit code ${exitCode}`;
@@ -235,11 +420,65 @@ export async function syncCatalog(config: CatalogConfig): Promise<SyncCatalogRes
             const successIndicators = ['was installed successfully', 'Installed successfully'];
             const hasSuccess = successIndicators.some(indicator => output.includes(indicator));
 
-            resolve({
-              success: hasSuccess,
-              output: output,
-              warnings: warnings
-            });
+            if (hasSuccess) {
+              // Try to read galaxy.yml metadata
+              (async () => {
+                try {
+                  let finalNamespace = expectedNamespace;
+                  let finalCollectionName = expectedCollectionName;
+
+                  if (expectedNamespace && expectedCollectionName) {
+                    const collectionPath = await findCollectionPath(expectedNamespace, expectedCollectionName);
+                    if (collectionPath) {
+                      const metadata = await readGalaxyMetadata(collectionPath);
+                      finalNamespace = metadata.namespace;
+                      finalCollectionName = metadata.collectionName;
+                    }
+                  } else {
+                    // For git+ URLs or when we don't have namespace/collectionName, search for installed collection
+                    const installed = await findInstalledCollection(collectionsDir);
+                    if (installed) {
+                      const metadata = await readGalaxyMetadata(installed.path);
+                      finalNamespace = metadata.namespace;
+                      finalCollectionName = metadata.collectionName;
+                    } else if (config.namespace && config.collectionName) {
+                      // Fallback to config values if available
+                      const collectionPath = await findCollectionPath(config.namespace, config.collectionName);
+                      if (collectionPath) {
+                        const metadata = await readGalaxyMetadata(collectionPath);
+                        finalNamespace = metadata.namespace;
+                        finalCollectionName = metadata.collectionName;
+                      }
+                    }
+                  }
+
+                  resolve({
+                    success: true,
+                    output: output + (finalNamespace && finalCollectionName ? `\n\nDetected namespace: ${finalNamespace}, collection: ${finalCollectionName}` : ''),
+                    warnings: warnings,
+                    namespace: finalNamespace,
+                    collectionName: finalCollectionName
+                  });
+                } catch (metadataError: any) {
+                  console.warn('Failed to read galaxy.yml metadata:', metadataError);
+                  resolve({
+                    success: true,
+                    output: output,
+                    warnings: warnings,
+                    namespace: expectedNamespace || config.namespace,
+                    collectionName: expectedCollectionName || config.collectionName
+                  });
+                }
+              })();
+            } else {
+              resolve({
+                success: false,
+                output: output,
+                warnings: warnings,
+                namespace: expectedNamespace || config.namespace,
+                collectionName: expectedCollectionName || config.collectionName
+              });
+            }
           }
         }).catch((error: any) => {
           // Even if promise rejects, check output for success indicators
@@ -256,11 +495,56 @@ export async function syncCatalog(config: CatalogConfig): Promise<SyncCatalogRes
                 warnings.push(line.trim());
               }
             });
-            resolve({
-              success: true,
-              output: output,
-              warnings: warnings
-            });
+
+            // Try to read galaxy.yml metadata
+            (async () => {
+              try {
+                let finalNamespace = expectedNamespace;
+                let finalCollectionName = expectedCollectionName;
+
+                if (expectedNamespace && expectedCollectionName) {
+                  const collectionPath = await findCollectionPath(expectedNamespace, expectedCollectionName);
+                  if (collectionPath) {
+                    const metadata = await readGalaxyMetadata(collectionPath);
+                    finalNamespace = metadata.namespace;
+                    finalCollectionName = metadata.collectionName;
+                  }
+                } else {
+                  // For git+ URLs or when we don't have namespace/collectionName, search for installed collection
+                  const installed = await findInstalledCollection(collectionsDir);
+                  if (installed) {
+                    const metadata = await readGalaxyMetadata(installed.path);
+                    finalNamespace = metadata.namespace;
+                    finalCollectionName = metadata.collectionName;
+                  } else if (config.namespace && config.collectionName) {
+                    // Fallback to config values if available
+                    const collectionPath = await findCollectionPath(config.namespace, config.collectionName);
+                    if (collectionPath) {
+                      const metadata = await readGalaxyMetadata(collectionPath);
+                      finalNamespace = metadata.namespace;
+                      finalCollectionName = metadata.collectionName;
+                    }
+                  }
+                }
+
+                resolve({
+                  success: true,
+                  output: output + (finalNamespace && finalCollectionName ? `\n\nDetected namespace: ${finalNamespace}, collection: ${finalCollectionName}` : ''),
+                  warnings: warnings,
+                  namespace: finalNamespace,
+                  collectionName: finalCollectionName
+                });
+              } catch (metadataError: any) {
+                console.warn('Failed to read galaxy.yml metadata:', metadataError);
+                resolve({
+                  success: true,
+                  output: output,
+                  warnings: warnings,
+                  namespace: expectedNamespace || config.namespace,
+                  collectionName: expectedCollectionName || config.collectionName
+                });
+              }
+            })();
             return;
           }
 
@@ -308,6 +592,10 @@ export async function syncCatalog(config: CatalogConfig): Promise<SyncCatalogRes
 }
 
 export async function getDemos(config: CatalogConfig): Promise<DemoDefinition[]> {
+  if (!config.namespace || !config.collectionName) {
+    throw new Error('Namespace and collection name are required. Please sync the catalog first to derive them from galaxy.yml.');
+  }
+
   const collectionPath = await findCollectionPath(config.namespace, config.collectionName);
 
   if (!collectionPath) {
@@ -376,7 +664,8 @@ function parseDemosYaml(content: string): DemoDefinition[] {
     } else if (currentDemo && !inParameters && trimmed.startsWith('type:')) {
       const typeMatch = trimmed.match(/type:\s*(.+)/);
       if (typeMatch) {
-        currentDemo.type = 'playbook';
+        const typeValue = typeMatch[1].trim().replace(/['"]/g, '');
+        currentDemo.type = (typeValue === 'role' ? 'role' : 'playbook') as 'playbook' | 'role';
       }
     } else if (currentDemo && !inParameters && (trimmed.startsWith('path:') || trimmed.startsWith('playbook:'))) {
       const pathMatch = trimmed.match(/(?:path|playbook):\s*(.+)/);
@@ -500,6 +789,10 @@ function parseDemosYaml(content: string): DemoDefinition[] {
 }
 
 export async function getCatalogPath(config: CatalogConfig): Promise<string> {
+  if (!config.namespace || !config.collectionName) {
+    throw new Error('Namespace and collection name are required. Please sync the catalog first to derive them from galaxy.yml.');
+  }
+
   const path = await findCollectionPath(config.namespace, config.collectionName);
   if (!path) {
     throw new Error(`Collection ${config.namespace}.${config.collectionName} not found`);
@@ -507,9 +800,18 @@ export async function getCatalogPath(config: CatalogConfig): Promise<string> {
   return path;
 }
 
-export async function getPlaybookPath(config: CatalogConfig, demoType: 'playbook', path: string): Promise<string> {
-  const collectionPath = await getCatalogPath(config);
-  return `${collectionPath}/playbooks/${path}`;
+export async function getPlaybookPath(config: CatalogConfig, demoType: 'playbook' | 'role', path: string): Promise<string> {
+  if (!config.namespace || !config.collectionName) {
+    throw new Error('Namespace and collection name are required. Please sync the catalog first.');
+  }
+
+  if (demoType === 'role') {
+    return `${config.namespace}.${config.collectionName}.${path}`;
+  } else {
+    // Strip .yml or .yaml extension from playbook name
+    const playbookName = path.replace(/\.(yml|yaml)$/, '');
+    return `${config.namespace}.${config.collectionName}.${playbookName}`;
+  }
 }
 
 export function getVariableDefinitions(parameters: DemoParameter[]): DemoParameter[] {

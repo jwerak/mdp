@@ -12,6 +12,10 @@
     collected_info: []
 
   tasks:
+    - name: sleep for 10 minutes
+      ansible.builtin.pause:
+        minutes: 10
+
     - name: Validate required variables are defined
       ansible.builtin.assert:
         that:
@@ -33,15 +37,19 @@
       loop: "{{ variable_definitions }}"
       when: item.name in demo_vars
 
+    - name: Expand demo_vars dictionary into individual variables
+      ansible.builtin.set_fact:
+        "{{ item.key }}": "{{ item.value }}"
+      loop: "{{ demo_vars | dict2items }}"
+      when: demo_vars | default({}) | length > 0
+
     - name: Include playbook
-      ansible.builtin.include_playbook: "{{ demo_path }}"
-      vars: "{{ demo_vars }}"
+      ansible.builtin.import_playbook: "{{ demo_path }}"
       when: demo_type == 'playbook'
 
     - name: Include role
-      ansible.builtin.include_role:
+      ansible.builtin.import_role:
         name: "{{ demo_path }}"
-      vars: "{{ demo_vars }}"
       when: demo_type == 'role'
 
     - name: Collect variable information for summary
@@ -49,8 +57,7 @@
         collected_info: "{{ collected_info + [{
           'name': item.name,
           'description': item.description | default(''),
-          'value': demo_vars[item.name] | default('N/A') | string
-        }] }}"
+          'value': demo_vars[item.name] | default('N/A') | string }] }}"
       loop: "{{ variable_definitions }}"
 
     - name: Display summary and save status
@@ -76,8 +83,6 @@
           'message': 'Execution completed successfully',
           'completedAt': ansible_date_time.iso8601,
           'summary': {
-            'collected_info': collected_info
-          }
-        } | to_json }}"
+          'collected_info': collected_info
+          } } | to_json }}"
         dest: "{{ status_file }}"
-

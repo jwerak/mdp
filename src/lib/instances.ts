@@ -1,4 +1,4 @@
-import { getPlaybookPath, getVariableDefinitions } from './catalog';
+import { ensureAnsibleCfg, getPlaybookPath, getVariableDefinitions } from './catalog';
 import { loadConfig } from './config';
 import { CatalogConfig, DemoDefinition, Instance, InstanceSpec, InstanceStatus } from './types';
 
@@ -17,7 +17,6 @@ function getCockpit() {
 
 const BASE_PATH = '/var/lib/cockpit-plugin-demos';
 const INSTANCES_PATH = `${BASE_PATH}/instances`;
-const META_PLAYBOOK_PATH = `${BASE_PATH}/meta/meta_playbook.yml`;
 
 function generateInstanceId(demoId: string): string {
   const randomStr = Math.random().toString(36).substring(2, 6).toLowerCase();
@@ -328,6 +327,21 @@ export async function executeInstance(
     output: ''
   });
 
+  // Ensure ansible.cfg exists with correct collections_paths
+  // This must succeed before running ansible-navigator
+  try {
+    await ensureAnsibleCfg();
+  } catch (error: any) {
+    const errorMsg = `Failed to create ansible.cfg: ${error.message || error}`;
+    console.error(errorMsg, error);
+    await updateStatus({
+      state: 'failed',
+      error: errorMsg,
+      completedAt: new Date().toISOString()
+    });
+    throw new Error(errorMsg);
+  }
+
   // Prepare extra vars for meta playbook
   const demoPath = instance.spec.playbook_path;
 
@@ -339,21 +353,18 @@ export async function executeInstance(
     variable_definitions: instance.spec.variable_definitions
   };
 
-  // Build collections paths for ansible-navigator
-  const collectionsPaths = [
-    '/var/lib/cockpit-plugin-demos/collections',
-    '~/.ansible/collections',
-    '/usr/share/ansible/collections'
-  ].join(',');
-
   // systemd-run --user doesn't inherit full PATH, so we wrap in bash with explicit PATH
   // This ensures ansible-navigator can be found in common installation locations
+  // Run ansible-navigator from BASE_PATH so it automatically mounts the working directory
+  // ANSIBLE_CONFIG environment variable points to ansible.cfg which configures collections_paths
+  // Using absolute path that will be available inside the execution environment (mounted working directory)
+  // The ansible.cfg file configures collections_paths to include /var/lib/cockpit-plugin-demos/collections
   const ansibleNavigatorCmd = [
     'bash', '-c',
     `export PATH="/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin:$HOME/.local/bin:$PATH" && ` +
-    `ansible-navigator run "${META_PLAYBOOK_PATH}" ` +
+    `export ANSIBLE_CONFIG="${BASE_PATH}/meta/ansible.cfg" && ` +
+    `ansible-navigator run "meta/meta_playbook.yml" ` +
     `--eei "${config.executionEnvironment}" ` +
-    `--collections-path "${collectionsPaths}" ` +
     `--extra-vars '${JSON.stringify(extraVars)}' ` +
     `--mode stdout ` +
     `--pull-policy missing`
@@ -363,6 +374,7 @@ export async function executeInstance(
     'systemd-run',
     '--user',
     '--unit', `cockpit-demo-${instanceId}`,
+    '--working-directory', BASE_PATH,
     '--collect',
     '--wait',
     '--',

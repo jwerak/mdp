@@ -47,8 +47,10 @@ The plugin checks these locations in addition to the plugin-specific directory w
 1.  **Data Models (`src/lib/types.ts`):**
     - `DemoParameter`: { name: string, label?: string, description?: string, type: 'text' | 'number' | 'boolean' | 'select', required: boolean, options?: string[], default?: any }
     - `DemoDefinition`: { id: string, name: string, description?: string, type: 'playbook', path: string, parameters: DemoParameter[] }
-    - `CatalogConfig`: { collectionSource?: string, namespace: string, collectionName: string, executionEnvironment?: string, useLocalCollection?: boolean }
+    - `CatalogConfig`: { collectionSource?: string, namespace?: string, collectionName?: string, executionEnvironment?: string, useLocalCollection?: boolean }
       - `collectionSource`: Git repository URL (`git+https://...`) or Ansible Galaxy format (`namespace.collection`). Required if `useLocalCollection` is false.
+      - `namespace`: Optional. Automatically derived from `galaxy.yml` file in the collection repository. Should not be manually set.
+      - `collectionName`: Optional. Automatically derived from `galaxy.yml` file in the collection repository (from the `name` field). Should not be manually set.
       - `useLocalCollection`: If true, load collection from locally installed locations instead of installing. Defaults to false.
     - `InstanceSpec`: Includes demoType, demoPath, and variable_definitions array
     - `InstanceStatus`: Includes optional summary field with collected_info array
@@ -58,6 +60,8 @@ The plugin checks these locations in addition to the plugin-specific directory w
       - If `useLocalCollection` is true, skips installation and searches for collection in local Ansible collection paths.
       - Otherwise, executes `ansible-galaxy collection install` command in the execution environment using `cockpit.spawn`.
       - Supports both Git repository URLs (`git+https://...`) and Ansible Galaxy format (`namespace.collection`).
+      - After installation, reads `galaxy.yml` from the installed collection to extract `namespace` and `name` (collection name) fields.
+      - If `namespace` or `collectionName` are not provided in config, they are automatically derived from the `galaxy.yml` file.
       - Uses `--collections-path /var/lib/cockpit-plugin-demos/collections` flag to install to plugin directory when installing.
       - Ensures collections directory structure follows Ansible standard layout: `collections/ansible_collections/{namespace}/{collectionName}`.
       - Creates `ansible.cfg` in meta directory with multiple `collections_paths` (plugin directory and standard locations) if it doesn't exist.
@@ -67,6 +71,11 @@ The plugin checks these locations in addition to the plugin-specific directory w
         2. User-specific: `~/.ansible/collections/ansible_collections/{namespace}/{collectionName}`
         3. System-wide: `/usr/share/ansible/collections/ansible_collections/{namespace}/{collectionName}`
       - Returns the first path where the collection is found, or null if not found.
+    - `readGalaxyMetadata(collectionPath)`:
+      - Reads `galaxy.yml` file from the collection path.
+      - Extracts `namespace` and `name` (collection name) fields from the YAML file.
+      - Returns an object with `namespace` and `collectionName` properties.
+      - Used to automatically populate namespace and collection name when not provided in config.
     - `getDemos()`:
       - Uses `findCollectionPath()` to locate the collection.
       - Reads `demos.yaml` from the found collection location: `{collectionPath}/demos.yaml`.
@@ -85,12 +94,16 @@ The plugin checks these locations in addition to the plugin-specific directory w
       - Meta playbook validates variables and executes the target playbook.
       - Parses status.json written by meta playbook (includes summary with collected_info).
       - Triggers `ansible-navigator` via `systemd-run` using the configured execution environment.
-      - Adds `--collections-path` flags to ansible-navigator command with multiple paths (plugin directory and standard locations) to ensure all collections are accessible.
-      - Collections directories are automatically mounted into execution environment by ansible-navigator.
+      - Uses `--working-directory` parameter of systemd-run to set BASE_PATH (`/var/lib/cockpit-plugin-demos`) as the working directory, so ansible-navigator automatically mounts it into the execution environment.
+      - Uses relative playbook path (`meta/meta_playbook.yml`) since execution happens from BASE_PATH.
+      - Uses `ansible.cfg` in the meta directory which configures `collections_paths` to include `/var/lib/cockpit-plugin-demos/collections` along with standard paths.
       - Captures and streams command output to the web UI.
 
 4.  **UI Components (PatternFly):**
-    - **Settings:** Form to configure Collection Source (Git URL or Galaxy format), Namespace, Collection Name, Execution Environment, and option to use locally installed collection.
+    - **Settings:** Form to configure Collection Source (Git URL or Galaxy format), Execution Environment, and option to use locally installed collection.
+      - Namespace and Collection Name fields should NOT be displayed in the form.
+      - These values are automatically derived from the `galaxy.yml` file in the collection repository after installation or when using local collections.
+      - If namespace/collectionName are needed before installation (e.g., for Galaxy format `namespace.collection`), they can be parsed from the collectionSource field.
     - **Catalog Grid:** Cards displaying available demos from `demos.yaml` with playbook type badges and descriptions.
     - **Dynamic Launch Modal:**
       - Takes a `DemoDefinition`.

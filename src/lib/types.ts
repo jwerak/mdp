@@ -12,15 +12,15 @@ export interface DemoDefinition {
   id: string;
   name: string;
   description?: string;
-  type: 'playbook';
+  type: 'playbook' | 'role';
   path: string;
   parameters: DemoParameter[];
 }
 
 export interface CatalogConfig {
   collectionSource?: string;
-  namespace: string;
-  collectionName: string;
+  namespace?: string;
+  collectionName?: string;
   executionEnvironment?: string;
   useLocalCollection?: boolean;
 }
@@ -28,7 +28,7 @@ export interface CatalogConfig {
 export interface InstanceSpec {
   demoId: string;
   demoName: string;
-  demoType: 'playbook';
+  demoType: 'playbook' | 'role';
   demoPath: string;
   playbook_path: string;
   parameters: Record<string, any>;

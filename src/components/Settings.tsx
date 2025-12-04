@@ -17,8 +17,6 @@ import { CatalogConfig } from '../lib/types';
 export const Settings: React.FC = () => {
   const [config, setConfig] = useState<CatalogConfig>({
     collectionSource: '',
-    namespace: 'local',
-    collectionName: '',
     useLocalCollection: false
   });
   const [loading, setLoading] = useState(false);
@@ -37,6 +35,12 @@ export const Settings: React.FC = () => {
       await saveConfig(config);
       const result = await syncCatalog(config);
       if (result.success) {
+        // Update config with derived namespace and collectionName
+        if (result.namespace && result.collectionName) {
+          const updatedConfig = { ...config, namespace: result.namespace, collectionName: result.collectionName };
+          await saveConfig(updatedConfig);
+          setConfig(updatedConfig);
+        }
         setMessage({
           type: 'success',
           text: result.warnings.length > 0
@@ -76,24 +80,8 @@ export const Settings: React.FC = () => {
               isDisabled={config.useLocalCollection}
             />
             <div style={{ fontSize: '0.875rem', color: 'var(--pf-v6-global--Color--200)', marginTop: '0.25rem' }}>
-              Git repository URL (git+https://...) or Ansible Galaxy format (namespace.collection)
+              Git repository URL (git+https://...) or Ansible Galaxy format (namespace.collection). Namespace and collection name will be automatically derived from galaxy.yml.
             </div>
-          </FormGroup>
-          <FormGroup label="Namespace" isRequired fieldId="namespace">
-            <TextInput
-              id="namespace"
-              value={config.namespace}
-              onChange={(_, value) => setConfig({ ...config, namespace: value })}
-              isRequired
-            />
-          </FormGroup>
-          <FormGroup label="Collection Name" isRequired fieldId="collectionName">
-            <TextInput
-              id="collectionName"
-              value={config.collectionName}
-              onChange={(_, value) => setConfig({ ...config, collectionName: value })}
-              isRequired
-            />
           </FormGroup>
           <ActionGroup>
             <Button type="submit" variant="primary" isDisabled={loading}>
