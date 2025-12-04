@@ -1,15 +1,15 @@
-import React, { useState, useEffect } from 'react';
 import {
+  Alert,
+  Badge,
   Card,
   CardBody,
   CardTitle,
   Grid,
   GridItem,
-  Title,
-  Alert,
   Spinner,
-  Badge
+  Title
 } from '@patternfly/react-core';
+import React, { useEffect, useState } from 'react';
 import { getDemos } from '../lib/catalog';
 import { loadConfig } from '../lib/config';
 import { DemoDefinition } from '../lib/types';
@@ -30,7 +30,7 @@ export const CatalogGrid: React.FC = () => {
     setError(null);
     try {
       const config = await loadConfig();
-      if (!config.repoUrl || !config.collectionName) {
+      if ((!config.useLocalCollection && !config.collectionSource) || !config.collectionName) {
         setError('Please configure catalog settings first');
         setLoading(false);
         return;

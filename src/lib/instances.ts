@@ -34,7 +34,7 @@ export async function createInstance(
   const specPath = `${instancePath}/spec.json`;
   const statusPath = `${instancePath}/status.json`;
 
-  const playbookPath = getPlaybookPath(config, demo.type, demo.path);
+  const playbookPath = await getPlaybookPath(config, demo.type, demo.path);
   const variableDefinitions = getVariableDefinitions(demo.parameters);
 
   const spec: InstanceSpec = {
@@ -329,11 +329,7 @@ export async function executeInstance(
   });
 
   // Prepare extra vars for meta playbook
-  // For playbooks, demo_path should be the full playbook path
-  // For roles, demo_path should be the role name
-  const demoPath = instance.spec.demoType === 'playbook'
-    ? instance.spec.playbook_path
-    : instance.spec.demoPath;
+  const demoPath = instance.spec.playbook_path;
 
   const extraVars = {
     instance_id: instanceId,
@@ -343,6 +339,13 @@ export async function executeInstance(
     variable_definitions: instance.spec.variable_definitions
   };
 
+  // Build collections paths for ansible-navigator
+  const collectionsPaths = [
+    '/var/lib/cockpit-plugin-demos/collections',
+    '~/.ansible/collections',
+    '/usr/share/ansible/collections'
+  ].join(',');
+
   // systemd-run --user doesn't inherit full PATH, so we wrap in bash with explicit PATH
   // This ensures ansible-navigator can be found in common installation locations
   const ansibleNavigatorCmd = [
@@ -350,8 +353,10 @@ export async function executeInstance(
     `export PATH="/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin:$HOME/.local/bin:$PATH" && ` +
     `ansible-navigator run "${META_PLAYBOOK_PATH}" ` +
     `--eei "${config.executionEnvironment}" ` +
+    `--collections-path "${collectionsPaths}" ` +
     `--extra-vars '${JSON.stringify(extraVars)}' ` +
-    `--mode stdout`
+    `--mode stdout ` +
+    `--pull-policy missing`
   ];
 
   const systemdRunArgs = [

@@ -14,180 +14,198 @@ function getCockpit() {
 }
 
 const BASE_PATH = '/var/lib/cockpit-plugin-demos';
-const CATALOG_PATH = `${BASE_PATH}/catalog`;
-const COLLECTIONS_PATH = `${CATALOG_PATH}/ansible_collections`;
+const COLLECTIONS_PATH = `${BASE_PATH}/collections/ansible_collections`;
+const META_PATH = `${BASE_PATH}/meta`;
+const ANSIBLE_CFG_PATH = `${META_PATH}/ansible.cfg`;
 
-export async function syncCatalog(config: CatalogConfig): Promise<void> {
-  const collectionPath = `${COLLECTIONS_PATH}/${config.namespace}/${config.collectionName}`;
-  const gitDirPath = `${collectionPath}/.git`;
+async function ensureAnsibleCfg(): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const cockpit = getCockpit();
+    cockpit.file(ANSIBLE_CFG_PATH).read()
+      .then(() => resolve())
+      .catch(() => {
+        const ansibleCfgContent = `[defaults]
+collections_paths = /var/lib/cockpit-plugin-demos/collections:~/.ansible/collections:/usr/share/ansible/collections
+`;
+        cockpit.spawn(['mkdir', '-p', META_PATH], { err: 'out' })
+          .then(() => cockpit.file(ANSIBLE_CFG_PATH).replace(ansibleCfgContent))
+          .then(() => resolve())
+          .catch((error: any) => reject(error));
+      });
+  });
+}
+
+export async function findCollectionPath(namespace: string, collectionName: string): Promise<string | null> {
+  const cockpit = getCockpit();
+  const searchPaths = [
+    `${COLLECTIONS_PATH}/${namespace}/${collectionName}`,
+    `/usr/share/ansible/collections/ansible_collections/${namespace}/${collectionName}`
+  ];
+
+  // Try user-specific path (expand ~ if possible)
+  try {
+    const homeDirResult = await new Promise<string>((resolve, reject) => {
+      const process = cockpit.spawn(['bash', '-c', 'echo $HOME'], { err: 'out' });
+      let output = '';
+      process.stream((data: string) => {
+        output += data;
+      });
+      if (typeof (process as any).done === 'function') {
+        (process as any).done(() => {
+          resolve(output.trim() || '/root');
+        });
+      } else {
+        process.then(() => resolve(output.trim() || '/root')).catch(reject);
+      }
+    });
+    if (homeDirResult) {
+      searchPaths.splice(1, 0, `${homeDirResult}/.ansible/collections/ansible_collections/${namespace}/${collectionName}`);
+    }
+  } catch {
+    // If we can't get home directory, skip user-specific path
+  }
+
+  for (const path of searchPaths) {
+    try {
+      const galaxyYmlPath = `${path}/galaxy.yml`;
+      await cockpit.file(galaxyYmlPath).read();
+      return path;
+    } catch {
+      continue;
+    }
+  }
+  return null;
+}
+
+export interface SyncCatalogResult {
+  success: boolean;
+  output: string;
+  warnings: string[];
+}
+
+export async function syncCatalog(config: CatalogConfig): Promise<SyncCatalogResult> {
+  if (config.useLocalCollection) {
+    const collectionPath = await findCollectionPath(config.namespace, config.collectionName);
+    if (!collectionPath) {
+      throw new Error(`Collection ${config.namespace}.${config.collectionName} not found in local Ansible collection paths`);
+    }
+    await ensureAnsibleCfg();
+    return {
+      success: true,
+      output: `Collection found at: ${collectionPath}`,
+      warnings: []
+    };
+  }
+
+  if (!config.collectionSource) {
+    throw new Error('Collection source is required when not using local collection');
+  }
+
+  if (!config.executionEnvironment) {
+    throw new Error('Execution environment is required for collection installation');
+  }
+
+  await ensureAnsibleCfg();
+
+  const collectionsDir = `${BASE_PATH}/collections`;
+  const collectionSpec = config.collectionSource.startsWith('git+')
+    ? config.collectionSource
+    : `${config.namespace}.${config.collectionName}`;
 
   return new Promise((resolve, reject) => {
     const cockpit = getCockpit();
 
-    // Helper function to clone the repository
-    const cloneRepository = () => {
-      // Ensure the parent directory of collectionPath exists (mkdir -p creates all nested dirs)
-      const parentDir = collectionPath.substring(0, collectionPath.lastIndexOf('/'));
-      console.log('parentDir', parentDir);
-      console.log('collectionPath', collectionPath);
-      cockpit.spawn(['mkdir', '-p', parentDir], { err: 'out' })
-        .then(() => {
-          // Remove existing directory if it exists but isn't a git repo
-          return cockpit.spawn(['rm', '-rf', collectionPath], { err: 'out' }).catch(() => {
-            // Ignore errors if directory doesn't exist
-          });
-        })
-        .then(() => {
-          // Now clone the repository
-          let outputBuffer = '';
-          let hasResolved = false;
-          const cloneProcess = cockpit.spawn(['git', 'clone', config.repoUrl, collectionPath], { err: 'out' });
-
-          cloneProcess.stream((data: string) => {
-            outputBuffer += data;
-          });
-
-          // Try to use done() callback if available
-          if (typeof (cloneProcess as any).done === 'function') {
-            (cloneProcess as any).done((exitCode: number) => {
-              if (hasResolved) return;
-              hasResolved = true;
-              if (exitCode === 0) {
-                resolve();
-              } else {
-                const errorMsg = outputBuffer.trim() || `Git clone failed with exit code ${exitCode}`;
-                console.error('Git clone failed:', errorMsg, 'Exit code:', exitCode);
-                reject(new Error(`Failed to clone catalog: ${errorMsg}`));
-              }
-            });
-
-            (cloneProcess as any).fail((error: any) => {
-              if (hasResolved) return;
-              hasResolved = true;
-              const exitStatus = error?.exit_status ?? error?.exitStatus;
-              let errorMsg = outputBuffer.trim();
-
-              if (!errorMsg && exitStatus !== undefined) {
-                switch (exitStatus) {
-                  case 128:
-                    errorMsg = 'Git clone failed (exit code 128). This may indicate authentication failure, repository not found, or permission denied.';
-                    break;
-                  case 1:
-                    errorMsg = 'Git clone failed (exit code 1). Check repository URL and permissions.';
-                    break;
-                  default:
-                    errorMsg = `Git clone failed with exit code ${exitStatus}`;
-                }
-              }
-
-              if (!errorMsg) {
-                errorMsg = error?.message || error?.toString() || String(error) || 'Unknown error';
-              }
-
-              console.error('Git clone process failed:', error, 'Exit status:', exitStatus, 'Output:', outputBuffer);
-              reject(new Error(`Failed to clone catalog: ${errorMsg}`));
-            });
-          }
-
-          // Fallback to promise chain
-          cloneProcess.then(() => {
-            if (!hasResolved) {
-              hasResolved = true;
-              resolve();
-            }
-          }).catch((error: any) => {
-            if (!hasResolved) {
-              hasResolved = true;
-              const exitStatus = error?.exit_status ?? error?.exitStatus;
-              let errorMsg = outputBuffer.trim();
-
-              if (!errorMsg && exitStatus !== undefined) {
-                switch (exitStatus) {
-                  case 128:
-                    errorMsg = 'Git clone failed (exit code 128). This may indicate authentication failure, repository not found, or permission denied.';
-                    break;
-                  case 1:
-                    errorMsg = 'Git clone failed (exit code 1). Check repository URL and permissions.';
-                    break;
-                  default:
-                    errorMsg = `Git clone failed with exit code ${exitStatus}`;
-                }
-              }
-
-              if (!errorMsg) {
-                errorMsg = error?.message || error?.toString() || String(error) || 'Git clone failed';
-              }
-
-              console.error('Git clone failed:', error, 'Exit status:', exitStatus, 'Output:', outputBuffer);
-              reject(new Error(`Failed to clone catalog: ${errorMsg}`));
-            }
-          });
-        })
-        .catch((error: any) => {
-          const exitStatus = error?.exit_status ?? error?.exitStatus;
-          let errorMsg = error?.message || error?.toString() || String(error);
-
-          if (exitStatus !== undefined) {
-            errorMsg = `Failed to create directory structure (exit code ${exitStatus}). ${errorMsg || 'Check permissions and disk space.'}`;
-          } else if (!errorMsg) {
-            errorMsg = 'Failed to create directory structure. Check permissions and disk space.';
-          }
-
-          console.error('Failed to create directory:', error, 'Exit status:', exitStatus);
-          reject(new Error(`Failed to clone catalog: ${errorMsg}`));
-        });
-    };
-
-    // Check if git repository exists by trying to read .git/HEAD file
-    cockpit.file(`${gitDirPath}/HEAD`).read()
+    // Ensure collections directory exists
+    cockpit.spawn(['mkdir', '-p', collectionsDir], { err: 'out' })
       .then(() => {
-        // Git repository appears to exist, try to pull latest changes
+        // Execute ansible-galaxy collection install in the execution environment
         let outputBuffer = '';
         let hasResolved = false;
-        const process = cockpit.spawn(['git', '-C', collectionPath, 'pull'], { err: 'out' });
 
-        process.stream((data: string) => {
+        // Build ansible-galaxy command
+        const ansibleGalaxyCmd = [
+          'bash', '-c',
+          `export PATH="/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin:$HOME/.local/bin:$PATH" && ` +
+          `ansible-galaxy collection install "${collectionSpec}" ` +
+          `--collections-path "${collectionsDir}" ` +
+          `--force`
+        ];
+
+        // Execute in execution environment using podman/docker
+        const installCmd = [
+          'podman', 'run', '--rm',
+          '-v', `${collectionsDir}:${collectionsDir}:Z`,
+          '-v', `${META_PATH}:${META_PATH}:Z`,
+          config.executionEnvironment!,
+          ...ansibleGalaxyCmd
+        ];
+
+        const installProcess = cockpit.spawn(installCmd, { err: 'out' });
+
+        installProcess.stream((data: string) => {
           outputBuffer += data;
+          console.log('ansible-galaxy output:', data);
         });
 
-        // Try to use done() callback if available
-        if (typeof (process as any).done === 'function') {
-          (process as any).done((exitCode: number) => {
+        // Handle process completion
+        if (typeof (installProcess as any).done === 'function') {
+          (installProcess as any).done((exitCode: number) => {
             if (hasResolved) return;
             hasResolved = true;
-            if (exitCode === 0) {
-              resolve();
+            const output = outputBuffer.trim();
+
+            // Parse warnings from output
+            const warnings: string[] = [];
+            const lines = output.split('\n');
+            lines.forEach(line => {
+              if (line.includes('[WARNING]') || line.includes('WARNING:')) {
+                warnings.push(line.trim());
+              }
+            });
+
+            // Check for success indicators in output first, regardless of exit code
+            // ansible-galaxy may exit with non-zero code even on success if warnings are present
+            const successIndicators = ['was installed successfully', 'Installed successfully'];
+            const hasSuccess = successIndicators.some(indicator => output.includes(indicator));
+
+            if (hasSuccess) {
+              // Installation succeeded, even if exit code is non-zero
+              resolve({
+                success: true,
+                output: output,
+                warnings: warnings
+              });
+            } else if (exitCode === 0) {
+              // Exit code is 0 but no clear success indicator - still treat as success
+              resolve({
+                success: true,
+                output: output,
+                warnings: warnings
+              });
             } else {
-              const errorMsg = outputBuffer.trim() || `Git pull failed with exit code ${exitCode}`;
-              console.error('Git pull failed:', errorMsg, 'Exit code:', exitCode);
-              reject(new Error(`Failed to pull catalog: ${errorMsg}`));
+              // No success indicators and non-zero exit code - treat as failure
+              const errorMsg = output || `Collection installation failed with exit code ${exitCode}`;
+              console.error('ansible-galaxy install failed:', errorMsg, 'Exit code:', exitCode);
+              reject(new Error(`Failed to install collection: ${errorMsg}`));
             }
           });
 
-          (process as any).fail((error: any) => {
+          (installProcess as any).fail((error: any) => {
             if (hasResolved) return;
             hasResolved = true;
             const exitStatus = error?.exit_status ?? error?.exitStatus;
             let errorMsg = outputBuffer.trim();
 
-            // If directory doesn't exist, fall back to clone
-            if (errorMsg.includes('cannot change to') || errorMsg.includes('No such file or directory')) {
-              console.warn('Directory does not exist, falling back to clone');
-              cloneRepository();
-              return;
-            }
-
             if (!errorMsg && exitStatus !== undefined) {
-              // Provide meaningful messages for common git error codes
               switch (exitStatus) {
-                case 128:
-                  errorMsg = 'Git operation failed (exit code 128). This may indicate authentication failure, repository not found, or permission denied.';
-                  break;
                 case 1:
-                  errorMsg = 'Git operation failed (exit code 1). Check repository URL and permissions.';
+                  errorMsg = 'Collection installation failed. Check collection source and execution environment.';
+                  break;
+                case 125:
+                  errorMsg = 'Container execution failed. Check execution environment configuration.';
                   break;
                 default:
-                  errorMsg = `Git pull failed with exit code ${exitStatus}`;
+                  errorMsg = `Collection installation failed with exit code ${exitStatus}`;
               }
             }
 
@@ -195,201 +213,115 @@ export async function syncCatalog(config: CatalogConfig): Promise<void> {
               errorMsg = error?.message || error?.toString() || String(error) || 'Unknown error';
             }
 
-            console.error('Git pull process failed:', error, 'Exit status:', exitStatus, 'Output:', outputBuffer);
-            reject(new Error(`Failed to pull catalog: ${errorMsg}`));
+            console.error('ansible-galaxy install process failed:', error, 'Exit status:', exitStatus, 'Output:', outputBuffer);
+            reject(new Error(`Failed to install collection: ${errorMsg}`));
           });
         }
 
         // Fallback to promise chain
-        process.then(() => {
+        installProcess.then(() => {
           if (!hasResolved) {
             hasResolved = true;
-            resolve();
+            const output = outputBuffer.trim();
+            const warnings: string[] = [];
+            const lines = output.split('\n');
+            lines.forEach(line => {
+              if (line.includes('[WARNING]') || line.includes('WARNING:')) {
+                warnings.push(line.trim());
+              }
+            });
+
+            // Check for success indicators in output
+            const successIndicators = ['was installed successfully', 'Installed successfully'];
+            const hasSuccess = successIndicators.some(indicator => output.includes(indicator));
+
+            resolve({
+              success: hasSuccess,
+              output: output,
+              warnings: warnings
+            });
           }
         }).catch((error: any) => {
+          // Even if promise rejects, check output for success indicators
+          const output = outputBuffer.trim();
+          const successIndicators = ['was installed successfully', 'Installed successfully'];
+          const hasSuccess = successIndicators.some(indicator => output.includes(indicator));
+
+          if (hasSuccess && !hasResolved) {
+            hasResolved = true;
+            const warnings: string[] = [];
+            const lines = output.split('\n');
+            lines.forEach(line => {
+              if (line.includes('[WARNING]') || line.includes('WARNING:')) {
+                warnings.push(line.trim());
+              }
+            });
+            resolve({
+              success: true,
+              output: output,
+              warnings: warnings
+            });
+            return;
+          }
+
           if (!hasResolved) {
             hasResolved = true;
             const exitStatus = error?.exit_status ?? error?.exitStatus;
             let errorMsg = outputBuffer.trim();
 
-            // If directory doesn't exist, fall back to clone
-            if (errorMsg.includes('cannot change to') || errorMsg.includes('No such file or directory')) {
-              console.warn('Directory does not exist, falling back to clone');
-              cloneRepository();
-              return;
-            }
-
             if (!errorMsg && exitStatus !== undefined) {
               switch (exitStatus) {
-                case 128: {
-                  // Check if it's a directory issue - check both errorMsg and outputBuffer
-                  const fullError = (errorMsg + ' ' + outputBuffer).toLowerCase();
-                  if (fullError.includes('cannot change to') || fullError.includes('no such file or directory')) {
-                    console.warn('Directory does not exist, falling back to clone');
-                    cloneRepository();
-                    return;
-                  }
-                  errorMsg = 'Git operation failed (exit code 128). This may indicate authentication failure, repository not found, or permission denied.';
-                  break;
-                }
                 case 1:
-                  errorMsg = 'Git operation failed (exit code 1). Check repository URL and permissions.';
+                  errorMsg = 'Collection installation failed. Check collection source and execution environment.';
+                  break;
+                case 125:
+                  errorMsg = 'Container execution failed. Check execution environment configuration.';
                   break;
                 default:
-                  errorMsg = `Git pull failed with exit code ${exitStatus}`;
+                  errorMsg = `Collection installation failed with exit code ${exitStatus}`;
               }
             }
 
             if (!errorMsg) {
-              errorMsg = error?.message || error?.toString() || String(error) || 'Git pull failed';
+              errorMsg = error?.message || error?.toString() || String(error) || 'Collection installation failed';
             }
 
-            console.error('Git pull failed:', error, 'Exit status:', exitStatus, 'Output:', outputBuffer);
-            reject(new Error(`Failed to pull catalog: ${errorMsg}`));
+            console.error('ansible-galaxy install failed:', error, 'Exit status:', exitStatus, 'Output:', outputBuffer);
+            reject(new Error(`Failed to install collection: ${errorMsg}`));
           }
         });
       })
-      .catch(() => {
-        // Git repository doesn't exist, clone the repo
-        // Ensure the parent directory of collectionPath exists (mkdir -p creates all nested dirs)
-        const parentDir = collectionPath.substring(0, collectionPath.lastIndexOf('/'));
-        cockpit.spawn(['mkdir', '-p', parentDir], { err: 'out' })
-          .then(() => {
-            // Remove existing directory if it exists but isn't a git repo
-            return cockpit.spawn(['rm', '-rf', collectionPath], { err: 'out' }).catch(() => {
-              // Ignore errors if directory doesn't exist
-            });
-          })
-          .then(() => {
-            // Now clone the repository
-            let outputBuffer = '';
-            let hasResolved = false;
-            const cloneProcess = cockpit.spawn(['git', 'clone', config.repoUrl, collectionPath], { err: 'out' });
+      .catch((error: any) => {
+        const exitStatus = error?.exit_status ?? error?.exitStatus;
+        let errorMsg = error?.message || error?.toString() || String(error);
 
-            cloneProcess.stream((data: string) => {
-              outputBuffer += data;
-            });
+        if (exitStatus !== undefined) {
+          errorMsg = `Failed to create collections directory (exit code ${exitStatus}). ${errorMsg || 'Check permissions and disk space.'}`;
+        } else if (!errorMsg) {
+          errorMsg = 'Failed to create collections directory. Check permissions and disk space.';
+        }
 
-            // Try to use done() callback if available
-            if (typeof (cloneProcess as any).done === 'function') {
-              (cloneProcess as any).done((exitCode: number) => {
-                if (hasResolved) return;
-                hasResolved = true;
-                if (exitCode === 0) {
-                  resolve();
-                } else {
-                  const errorMsg = outputBuffer.trim() || `Git clone failed with exit code ${exitCode}`;
-                  console.error('Git clone failed:', errorMsg, 'Exit code:', exitCode);
-                  reject(new Error(`Failed to clone catalog: ${errorMsg}`));
-                }
-              });
-
-              (cloneProcess as any).fail((error: any) => {
-                if (hasResolved) return;
-                hasResolved = true;
-                const exitStatus = error?.exit_status ?? error?.exitStatus;
-                let errorMsg = outputBuffer.trim();
-
-                if (!errorMsg && exitStatus !== undefined) {
-                  switch (exitStatus) {
-                    case 128:
-                      errorMsg = 'Git clone failed (exit code 128). This may indicate authentication failure, repository not found, or permission denied.';
-                      break;
-                    case 1:
-                      errorMsg = 'Git clone failed (exit code 1). Check repository URL and permissions.';
-                      break;
-                    default:
-                      errorMsg = `Git clone failed with exit code ${exitStatus}`;
-                  }
-                }
-
-                if (!errorMsg) {
-                  errorMsg = error?.message || error?.toString() || String(error) || 'Unknown error';
-                }
-
-                console.error('Git clone process failed:', error, 'Exit status:', exitStatus, 'Output:', outputBuffer);
-                reject(new Error(`Failed to clone catalog: ${errorMsg}`));
-              });
-            }
-
-            // Fallback to promise chain
-            cloneProcess.then(() => {
-              if (!hasResolved) {
-                hasResolved = true;
-                resolve();
-              }
-            }).catch((error: any) => {
-              if (!hasResolved) {
-                hasResolved = true;
-                const exitStatus = error?.exit_status ?? error?.exitStatus;
-                let errorMsg = outputBuffer.trim();
-
-                if (!errorMsg && exitStatus !== undefined) {
-                  switch (exitStatus) {
-                    case 128:
-                      errorMsg = 'Git clone failed (exit code 128). This may indicate authentication failure, repository not found, or permission denied.';
-                      break;
-                    case 1:
-                      errorMsg = 'Git clone failed (exit code 1). Check repository URL and permissions.';
-                      break;
-                    default:
-                      errorMsg = `Git clone failed with exit code ${exitStatus}`;
-                  }
-                }
-
-                if (!errorMsg) {
-                  errorMsg = error?.message || error?.toString() || String(error) || 'Git clone failed';
-                }
-
-                console.error('Git clone failed:', error, 'Exit status:', exitStatus, 'Output:', outputBuffer);
-                reject(new Error(`Failed to clone catalog: ${errorMsg}`));
-              }
-            });
-          })
-          .catch((error: any) => {
-            const exitStatus = error?.exit_status ?? error?.exitStatus;
-            let errorMsg = error?.message || error?.toString() || String(error);
-
-            if (exitStatus !== undefined) {
-              errorMsg = `Failed to create directory structure (exit code ${exitStatus}). ${errorMsg || 'Check permissions and disk space.'}`;
-            } else if (!errorMsg) {
-              errorMsg = 'Failed to create directory structure. Check permissions and disk space.';
-            }
-
-            console.error('Failed to create directory:', error, 'Exit status:', exitStatus);
-            reject(new Error(`Failed to clone catalog: ${errorMsg}`));
-          });
+        console.error('Failed to create collections directory:', error, 'Exit status:', exitStatus);
+        reject(new Error(`Failed to install collection: ${errorMsg}`));
       });
   });
 }
 
 export async function getDemos(config: CatalogConfig): Promise<DemoDefinition[]> {
-  const collectionPath = `${COLLECTIONS_PATH}/${config.namespace}/${config.collectionName}`;
+  const collectionPath = await findCollectionPath(config.namespace, config.collectionName);
+
+  if (!collectionPath) {
+    throw new Error(`Collection ${config.namespace}.${config.collectionName} not found. Please sync the catalog first.`);
+  }
+
   const demosYamlPath = `${collectionPath}/demos.yaml`;
 
   return new Promise((resolve, reject) => {
     getCockpit().file(demosYamlPath).read()
-      .then(async (content: string) => {
+      .then((content: string) => {
         try {
           const demos = parseDemosYaml(content);
-
-          // For role-based demos, discover and merge role variables
-          const enrichedDemos = await Promise.all(
-            demos.map(async (demo) => {
-              if (demo.type === 'role') {
-                try {
-                  const roleVars = await discoverRoleVariables(config, demo.path);
-                  demo.parameters = mergeRoleAndDemoParameters(roleVars, demo.parameters);
-                } catch (error: any) {
-                  console.warn(`Failed to discover role variables for ${demo.id}: ${error.message}`);
-                  // Continue with demos.yaml parameters only
-                }
-              }
-              return demo;
-            })
-          );
-
-          resolve(enrichedDemos);
+          resolve(demos);
         } catch (error: any) {
           reject(new Error(`Failed to parse demos.yaml: ${error.message}`));
         }
@@ -444,8 +376,7 @@ function parseDemosYaml(content: string): DemoDefinition[] {
     } else if (currentDemo && !inParameters && trimmed.startsWith('type:')) {
       const typeMatch = trimmed.match(/type:\s*(.+)/);
       if (typeMatch) {
-        const typeValue = typeMatch[1].trim().replace(/['"]/g, '');
-        currentDemo.type = typeValue as 'playbook' | 'role';
+        currentDemo.type = 'playbook';
       }
     } else if (currentDemo && !inParameters && (trimmed.startsWith('path:') || trimmed.startsWith('playbook:'))) {
       const pathMatch = trimmed.match(/(?:path|playbook):\s*(.+)/);
@@ -568,174 +499,17 @@ function parseDemosYaml(content: string): DemoDefinition[] {
   return demos;
 }
 
-interface RoleVariable {
-  name: string;
-  defaultValue: any;
-  label?: string;
-  description?: string;
-}
-
-async function discoverRoleVariables(config: CatalogConfig, roleName: string): Promise<RoleVariable[]> {
-  const collectionPath = getCatalogPath(config);
-  const roleDefaultsPath = `${collectionPath}/roles/${roleName}/defaults/main.yml`;
-
-  return new Promise((resolve, reject) => {
-    getCockpit().file(roleDefaultsPath).read()
-      .then((content: string) => {
-        try {
-          if (!content || typeof content !== 'string') {
-            // File exists but is empty or invalid, return empty array
-            resolve([]);
-            return;
-          }
-          const roleVars = parseRoleDefaults(content);
-          resolve(roleVars);
-        } catch (error: any) {
-          reject(new Error(`Failed to parse role defaults: ${error.message}`));
-        }
-      })
-      .catch((error: any) => {
-        reject(new Error(`Failed to read role defaults: ${error.message || 'File not found'}`));
-      });
-  });
-}
-
-function parseRoleDefaults(content: string): RoleVariable[] {
-  if (!content || typeof content !== 'string') {
-    return [];
+export async function getCatalogPath(config: CatalogConfig): Promise<string> {
+  const path = await findCollectionPath(config.namespace, config.collectionName);
+  if (!path) {
+    throw new Error(`Collection ${config.namespace}.${config.collectionName} not found`);
   }
-  const lines = content.split('\n');
-  const variables: Map<string, RoleVariable> = new Map();
-  let currentVar: string | null = null;
-  let inMultiline = false;
-  let multilineValue: string[] = [];
-
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
-    const trimmed = line.trim();
-
-    // Skip comments and empty lines
-    if (trimmed.startsWith('#') || trimmed === '') {
-      continue;
-    }
-
-    // Match variable assignment: variable_name: value
-    const varMatch = trimmed.match(/^([a-zA-Z_][a-zA-Z0-9_]*):\s*(.+)$/);
-    if (varMatch) {
-      const varName = varMatch[1];
-      const varValue = varMatch[2].trim();
-
-      // Skip metadata keys (_label, _description)
-      if (varName.endsWith('_label') || varName.endsWith('_description')) {
-        const baseName = varName.replace(/_label$|_description$/, '');
-        if (variables.has(baseName)) {
-          const existing = variables.get(baseName)!;
-          if (varName.endsWith('_label')) {
-            existing.label = varValue.replace(/['"]/g, '');
-          } else {
-            existing.description = varValue.replace(/['"]/g, '');
-          }
-        }
-        continue;
-      }
-
-      // Handle multiline strings
-      if (varValue === '|' || varValue === '>') {
-        inMultiline = true;
-        multilineValue = [];
-        currentVar = varName;
-        continue;
-      }
-
-      // Parse value
-      let parsedValue: any = varValue.replace(/['"]/g, '');
-      if (parsedValue === 'true') parsedValue = true;
-      else if (parsedValue === 'false') parsedValue = false;
-      else if (!isNaN(Number(parsedValue)) && parsedValue !== '') parsedValue = Number(parsedValue);
-
-      variables.set(varName, {
-        name: varName,
-        defaultValue: parsedValue
-      });
-      currentVar = null;
-    } else if (inMultiline && currentVar) {
-      // Handle multiline continuation
-      if (trimmed === '' || trimmed.match(/^\s+/)) {
-        multilineValue.push(line);
-      } else {
-        // End of multiline
-        if (variables.has(currentVar)) {
-          variables.get(currentVar)!.defaultValue = multilineValue.join('\n');
-        }
-        inMultiline = false;
-        currentVar = null;
-        multilineValue = [];
-      }
-    }
-  }
-
-  return Array.from(variables.values());
+  return path;
 }
 
-function mergeRoleAndDemoParameters(
-  roleVars: RoleVariable[],
-  demoParams: DemoParameter[]
-): DemoParameter[] {
-  const merged: DemoParameter[] = [];
-  const demoParamMap = new Map<string, DemoParameter>();
-
-  // Index demo parameters by name
-  demoParams.forEach(param => {
-    demoParamMap.set(param.name, param);
-  });
-
-  // Process variables that exist in both
-  const processedVars = new Set<string>();
-  demoParams.forEach(demoParam => {
-    const roleVar = roleVars.find(rv => rv.name === demoParam.name);
-    processedVars.add(demoParam.name);
-
-    const mergedParam: DemoParameter = {
-      name: demoParam.name,
-      label: demoParam.label || roleVar?.label || demoParam.name,
-      description: demoParam.description || roleVar?.description || '',
-      type: demoParam.type,
-      required: demoParam.required,
-      default: demoParam.default !== undefined ? demoParam.default : roleVar?.defaultValue,
-      options: demoParam.options
-    };
-
-    merged.push(mergedParam);
-  });
-
-  // Add variables only in role
-  roleVars.forEach(roleVar => {
-    if (!processedVars.has(roleVar.name)) {
-      merged.push({
-        name: roleVar.name,
-        label: roleVar.label || roleVar.name,
-        description: roleVar.description || '',
-        type: 'text',
-        required: false,
-        default: roleVar.defaultValue
-      });
-    }
-  });
-
-  return merged;
-}
-
-export function getCatalogPath(config: CatalogConfig): string {
-  return `${COLLECTIONS_PATH}/${config.namespace}/${config.collectionName}`;
-}
-
-export function getPlaybookPath(config: CatalogConfig, demoType: 'playbook' | 'role', path: string): string {
-  const collectionPath = getCatalogPath(config);
-  if (demoType === 'playbook') {
-    return `${collectionPath}/playbooks/${path}`;
-  } else {
-    return path; // Role name, used directly
-  }
+export async function getPlaybookPath(config: CatalogConfig, demoType: 'playbook', path: string): Promise<string> {
+  const collectionPath = await getCatalogPath(config);
+  return `${collectionPath}/playbooks/${path}`;
 }
 
 export function getVariableDefinitions(parameters: DemoParameter[]): DemoParameter[] {

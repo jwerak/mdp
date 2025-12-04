@@ -39,7 +39,7 @@ export const DemoList: React.FC<DemoListProps> = ({ onConfigureCatalog }) => {
     setError(null);
     try {
       const config = await loadConfig();
-      if (!config.repoUrl || !config.collectionName) {
+      if ((!config.useLocalCollection && !config.collectionSource) || !config.collectionName) {
         setError('not_configured');
         setLoading(false);
         return;

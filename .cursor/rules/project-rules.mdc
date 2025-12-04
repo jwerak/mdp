@@ -1,58 +1,76 @@
 Act as a Senior Linux Systems Developer and React Expert. I need you to scaffold a **Cockpit Project Plugin** to manage "Demo Deployments."
 
 **Context:**
-- **Goal:** Users deploy demos defined in a remote Git repository.
-- **The Repository:** Is a valid **Ansible Collection**. It contains a special `demos.yaml` file in its root describing the available demos and their input parameters.
+- **Goal:** Users deploy demos defined in Ansible Collections.
+- **Collections:** Collections can be installed via `ansible-galaxy collection install` using standard Ansible tooling, or loaded from locally installed collections in standard Ansible locations. Each collection contains a special `demos.yaml` file in its root describing the available demos and their input parameters.
+- **Local Collections:** The plugin supports loading collections from standard Ansible collection paths (e.g., `~/.ansible/collections`, `/usr/share/ansible/collections`) in addition to the plugin-specific directory.
 - **Persistence:** Filesystem-based (Split-File pattern) in `/var/lib/cockpit-plugin-demos/`.
 - **Execution:** Ansible playbooks are executed via `ansible-navigator` triggered by `systemd-run`. The command output is displayed in the web UI.
-- **Execution Environment:** Configuration must be provided to define the execution environment (EE) used by `ansible-navigator`.
+- **Execution Environment:** Configuration must be provided to define the execution environment (EE) used by `ansible-navigator`. The EE must include `ansible-galaxy` command for collection installation when needed.
 
 **Security:**
 - Plugin runs as a standard user (member of `cockpit-demo-ops` group).
 - NO `sudo` in code.
 
 **Directory Structure (CRITICAL):**
-To ensure the Ansible Runner can use the cloned repo as a Collection, the plugin must maintain this Host structure:
+To ensure Ansible can use collections installed via standard tooling, the plugin must maintain this Host structure:
 
 ```text
 /var/lib/cockpit-plugin-demos/
-  ├── catalog/
+  ├── collections/              <-- Plugin-specific Ansible collections directory
   │   └── ansible_collections/
-  │       └── <namespace>/      <-- Inferred from user input or default to 'local'
-  │           └── <collection>/ <-- The Git Clone target
+  │       └── <namespace>/
+  │           └── <collection>/ <-- Installed via ansible-galaxy collection install
   │               ├── galaxy.yml
+  │               ├── demos.yaml  <-- Demo definitions for this collection
   │               ├── playbooks/
   │               └── roles/
   ├── meta/
-  │   └── meta_playbook.yml  <-- Main meta playbook for execution
-  ├── demos.yaml
+  │   ├── meta_playbook.yml  <-- Main meta playbook for execution
+  │   └── ansible.cfg        <-- Ansible configuration with collections_paths
   └── instances/
       └── <instance-id>/
           ├── spec.json
           └── status.json
 ```
 
+**Local Collections:**
+Collections may also be loaded from standard Ansible collection paths:
+- `~/.ansible/collections/ansible_collections/` (user-specific)
+- `/usr/share/ansible/collections/` (system-wide)
+- Paths configured in system `ansible.cfg` or `ANSIBLE_COLLECTIONS_PATHS` environment variable
+
+The plugin checks these locations in addition to the plugin-specific directory when loading collections.
+
 **Requirements:**
 
 1.  **Data Models (`src/lib/types.ts`):**
     - `DemoParameter`: { name: string, label?: string, description?: string, type: 'text' | 'number' | 'boolean' | 'select', required: boolean, options?: string[], default?: any }
-    - `DemoDefinition`: { id: string, name: string, description?: string, type: 'playbook' | 'role', path: string, parameters: DemoParameter[] }
-    - `CatalogConfig`: { repoUrl: string, namespace: string, collectionName: string, executionEnvironment?: string }
+    - `DemoDefinition`: { id: string, name: string, description?: string, type: 'playbook', path: string, parameters: DemoParameter[] }
+    - `CatalogConfig`: { collectionSource?: string, namespace: string, collectionName: string, executionEnvironment?: string, useLocalCollection?: boolean }
+      - `collectionSource`: Git repository URL (`git+https://...`) or Ansible Galaxy format (`namespace.collection`). Required if `useLocalCollection` is false.
+      - `useLocalCollection`: If true, load collection from locally installed locations instead of installing. Defaults to false.
     - `InstanceSpec`: Includes demoType, demoPath, and variable_definitions array
     - `InstanceStatus`: Includes optional summary field with collected_info array
 
 2.  **Catalog Service (`src/lib/catalog.ts`):**
     - `syncCatalog(config)`:
-      - Uses `cockpit.spawn` to `git clone` (or `git pull`) into the correct nested path: `catalog/ansible_collections/{namespace}/{collectionName}`.
+      - If `useLocalCollection` is true, skips installation and searches for collection in local Ansible collection paths.
+      - Otherwise, executes `ansible-galaxy collection install` command in the execution environment using `cockpit.spawn`.
+      - Supports both Git repository URLs (`git+https://...`) and Ansible Galaxy format (`namespace.collection`).
+      - Uses `--collections-path /var/lib/cockpit-plugin-demos/collections` flag to install to plugin directory when installing.
+      - Ensures collections directory structure follows Ansible standard layout: `collections/ansible_collections/{namespace}/{collectionName}`.
+      - Creates `ansible.cfg` in meta directory with multiple `collections_paths` (plugin directory and standard locations) if it doesn't exist.
+    - `findCollectionPath(namespace, collectionName)`:
+      - Searches for collection in multiple locations in order:
+        1. Plugin-specific: `/var/lib/cockpit-plugin-demos/collections/ansible_collections/{namespace}/{collectionName}`
+        2. User-specific: `~/.ansible/collections/ansible_collections/{namespace}/{collectionName}`
+        3. System-wide: `/usr/share/ansible/collections/ansible_collections/{namespace}/{collectionName}`
+      - Returns the first path where the collection is found, or null if not found.
     - `getDemos()`:
-      - Reads `demos.yaml` from the cloned repo.
-      - For role-based demos, auto-discovers variables from `roles/<role-name>/defaults/main.yml`.
-      - Merges role defaults with demos.yaml parameters (demos.yaml takes precedence for metadata).
+      - Uses `findCollectionPath()` to locate the collection.
+      - Reads `demos.yaml` from the found collection location: `{collectionPath}/demos.yaml`.
       - Returns `DemoDefinition[]`.
-    - `discoverRoleVariables()`:
-      - Reads role defaults/main.yml and extracts variables, labels (`*_label`), and descriptions (`*_description`).
-    - `mergeRoleAndDemoParameters()`:
-      - Combines role variables with demos.yaml parameters, respecting precedence rules.
     - `getVariableDefinitions()`:
       - Generates variable definitions array for meta playbook validation.
 
@@ -64,14 +82,16 @@ To ensure the Ansible Runner can use the cloned repo as a Collection, the plugin
     - `executeInstance(instanceId, executionEnvironment)`:
       - Calls meta playbook (`/var/lib/cockpit-plugin-demos/meta/meta_playbook.yml`) instead of direct playbook.
       - Passes `instance_id`, `demo_type`, `demo_path`, `demo_vars`, and `variable_definitions` as extra-vars.
-      - Meta playbook validates variables and executes the target playbook/role.
+      - Meta playbook validates variables and executes the target playbook.
       - Parses status.json written by meta playbook (includes summary with collected_info).
       - Triggers `ansible-navigator` via `systemd-run` using the configured execution environment.
+      - Adds `--collections-path` flags to ansible-navigator command with multiple paths (plugin directory and standard locations) to ensure all collections are accessible.
+      - Collections directories are automatically mounted into execution environment by ansible-navigator.
       - Captures and streams command output to the web UI.
 
 4.  **UI Components (PatternFly):**
-    - **Settings:** Form to configure Git Repo URL, Namespace, Collection Name, and Execution Environment.
-    - **Catalog Grid:** Cards displaying available demos from `demos.yaml` with type badges (playbook/role) and descriptions.
+    - **Settings:** Form to configure Collection Source (Git URL or Galaxy format), Namespace, Collection Name, Execution Environment, and option to use locally installed collection.
+    - **Catalog Grid:** Cards displaying available demos from `demos.yaml` with playbook type badges and descriptions.
     - **Dynamic Launch Modal:**
       - Takes a `DemoDefinition`.
       - **Dynamically renders inputs** based on `parameters` array.
@@ -85,51 +105,40 @@ To ensure the Ansible Runner can use the cloned repo as a Collection, the plugin
 
 **demos.yaml Structure:**
 
-The `demos.yaml` file in the collection repo root must follow this structure:
+The `demos.yaml` file must be located in the root of each collection (e.g., `collections/ansible_collections/{namespace}/{collection}/demos.yaml` or in standard Ansible collection paths) and must follow this structure:
 
 ```yaml
 demos:
   - id: <unique-demo-id>
     name: <human-readable-name>
     description: <optional-description>
-    type: playbook | role
-    path: <relative-path-to-playbook-or-role>
+    type: playbook
+    path: <relative-path-to-playbook>
     parameters:
       - name: <variable-name>
-        label: <display-label>  # Optional if defined in role
-        description: <help-text-description>  # Optional if defined in role
+        label: <display-label>  # Optional
+        description: <help-text-description>  # Optional
         type: text | number | boolean | select  # Required for validation
         required: true | false  # Required for validation
-        default: <default-value>  # Optional - role default will be used if not specified
+        default: <default-value>  # Optional
         options: [<for-select-type>]  # Required for select type
 ```
-
-**Role Variable Metadata Convention:**
-
-Roles can define variable metadata in `roles/<role-name>/defaults/main.yml`:
-
-```yaml
-# Standard variable with default value
-my_variable: "default_value"
-
-# Variable metadata (optional, used for UI)
-my_variable_label: "Display Label"
-my_variable_description: "Help text explaining what this variable does"
-```
-
-- Variable: `variable_name`
-- Label: `variable_name_label` (optional)
-- Description: `variable_name_description` (optional)
-- Merging: demos.yaml metadata takes precedence over role metadata, but role defaults are used when not specified in demos.yaml
 
 **Meta Playbook Pattern:**
 
 The meta playbook (`/var/lib/cockpit-plugin-demos/meta/meta_playbook.yml`) validates variables and executes demos:
 - Validates required variables are defined
 - Validates variable types (text, number, boolean, select)
-- Includes playbook or role based on demo_type
+- Includes playbook based on demo_type
 - Collects variable information for summary
 - Writes status.json with summary including collected_info
+
+**Ansible Configuration:**
+
+The `ansible.cfg` file in `/var/lib/cockpit-plugin-demos/meta/` must be configured with multiple collection paths:
+- `collections_paths = /var/lib/cockpit-plugin-demos/collections:~/.ansible/collections:/usr/share/ansible/collections`
+
+This ensures ansible-navigator can access collections from both the plugin-specific directory and standard Ansible locations when executing playbooks.
 
 **Status File Structure:**
 
@@ -154,9 +163,13 @@ The meta playbook (`/var/lib/cockpit-plugin-demos/meta/meta_playbook.yml`) valid
 ```
 
 **Constraints:**
-- Use `cockpit.spawn` for Git operations.
+- Use `cockpit.spawn` to execute `ansible-galaxy collection install` command in the execution environment when installing collections.
+- Support loading collections from locally installed locations without requiring installation.
+- Search for collections in multiple standard Ansible paths: plugin directory, user-specific (`~/.ansible/collections`), and system-wide (`/usr/share/ansible/collections`).
 - Handle missing `demos.yaml` gracefully (show "Invalid Catalog" error).
-- Handle missing role defaults gracefully (log warning, use demos.yaml only).
+- Handle missing collections gracefully (show appropriate error message).
 - Ensure file paths used in `cockpit.file` are constructed safely.
-- Validate demo type is either 'playbook' or 'role'.
-- Handle YAML parsing errors in role defaults gracefully.
+- Validate demo type is 'playbook'.
+- Handle YAML parsing errors in demos.yaml gracefully.
+- Execution environment must have `ansible-galaxy` command available when installing collections.
+- Collections directories must be mounted into execution environment when running ansible-navigator (handled automatically via `--collections-path` flags).
