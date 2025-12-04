@@ -16,22 +16,19 @@ function getCockpit() {
 
 const BASE_PATH = '/var/lib/cockpit-plugin-demos';
 const COLLECTIONS_PATH = `${BASE_PATH}/collections/ansible_collections`;
-const META_PATH = `${BASE_PATH}/meta`;
-const ANSIBLE_CFG_PATH = `${META_PATH}/ansible.cfg`;
+const ANSIBLE_CFG_PATH = '/usr/share/cockpit-plugin-demos/meta/ansible.cfg';
 
 export async function ensureAnsibleCfg(): Promise<void> {
   return new Promise((resolve, reject) => {
     const cockpit = getCockpit();
+    // Verify that ansible.cfg exists at the expected location
+    // This file should be installed during deployment to /usr/share/cockpit-plugin-demos/meta/
     cockpit.file(ANSIBLE_CFG_PATH).read()
       .then(() => resolve())
-      .catch(() => {
-        const ansibleCfgContent = `[defaults]
-collections_paths = /var/lib/cockpit-plugin-demos/collections:~/.ansible/collections:/usr/share/ansible/collections
-`;
-        cockpit.spawn(['mkdir', '-p', META_PATH], { err: 'out' })
-          .then(() => cockpit.file(ANSIBLE_CFG_PATH).replace(ansibleCfgContent))
-          .then(() => resolve())
-          .catch((error: any) => reject(error));
+      .catch((error: any) => {
+        const errorMsg = `ansible.cfg not found at ${ANSIBLE_CFG_PATH}. Please ensure the meta directory was properly installed during setup.`;
+        console.error(errorMsg, error);
+        reject(new Error(errorMsg));
       });
   });
 }
@@ -390,221 +387,230 @@ export async function syncCatalog(config: CatalogConfig): Promise<SyncCatalogRes
   return new Promise((resolve, reject) => {
     const cockpit = getCockpit();
 
-    // Ensure collections directory exists
-    cockpit.spawn(['mkdir', '-p', collectionsDir], { err: 'out' })
+    // Ensure collections directory and ansible_collections subdirectory exist
+    // Use install -d to create with cockpit-demo-ops group and 775 permissions
+    // This ensures group members can write even if ownership isn't root
+    cockpit.spawn(['bash', '-c', `umask 002 && install -d -g cockpit-demo-ops -m 775 "${collectionsDir}/ansible_collections"`], { err: 'out' })
       .then(() => {
-        // Execute ansible-galaxy collection install in the execution environment
-        let outputBuffer = '';
-        let hasResolved = false;
+        // Try container first, fallback to local if container fails
+        tryInstallWithContainer(cockpit, collectionSpec, collectionsDir, config, expectedNamespace, expectedCollectionName)
+          .then(result => resolve(result))
+          .catch(containerError => {
+            console.warn('Container installation failed, trying local ansible-galaxy:', containerError);
+            // Check if error is container-related (SELinux, permissions, etc.)
+            const errorMsg = containerError?.message || String(containerError) || '';
+            const isContainerError = errorMsg.includes('container_file_t') ||
+              errorMsg.includes('lsetxattr') ||
+              errorMsg.includes('operation not permitted') ||
+              errorMsg.includes('Permission denied') ||
+              errorMsg.includes('PermissionError') ||
+              errorMsg.includes('Container execution failed') ||
+              errorMsg.includes('exit code 125');
 
-        // Build ansible-galaxy command
-        const ansibleGalaxyCmd = [
-          'bash', '-c',
-          `export PATH="/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin:$HOME/.local/bin:$PATH" && ` +
-          `ansible-galaxy collection install "${collectionSpec}" ` +
-          `--collections-path "${collectionsDir}" ` +
-          `--force`
-        ];
-
-        // Execute in execution environment using podman/docker
-        const installCmd = [
-          'podman', 'run', '--rm',
-          '-v', `${collectionsDir}:${collectionsDir}:Z`,
-          '-v', `${META_PATH}:${META_PATH}:Z`,
-          config.executionEnvironment!,
-          ...ansibleGalaxyCmd
-        ];
-
-        const installProcess = cockpit.spawn(installCmd, { err: 'out' });
-
-        installProcess.stream((data: string) => {
-          outputBuffer += data;
-          console.log('ansible-galaxy output:', data);
-        });
-
-        // Handle process completion
-        if (typeof (installProcess as any).done === 'function') {
-          (installProcess as any).done((exitCode: number) => {
-            if (hasResolved) return;
-            hasResolved = true;
-            const output = outputBuffer.trim();
-
-            // Parse warnings from output
-            const warnings: string[] = [];
-            const lines = output.split('\n');
-            lines.forEach(line => {
-              if (line.includes('[WARNING]') || line.includes('WARNING:')) {
-                warnings.push(line.trim());
-              }
-            });
-
-            // Check for success indicators in output first, regardless of exit code
-            // ansible-galaxy may exit with non-zero code even on success if warnings are present
-            const successIndicators = ['was installed successfully', 'Installed successfully'];
-            const hasSuccess = successIndicators.some(indicator => output.includes(indicator));
-
-            if (hasSuccess || exitCode === 0) {
-              // Installation succeeded - now extract metadata and cache it in config.json
-              (async () => {
-                try {
-                  const metadata = await extractCollectionMetadata(output, expectedNamespace, expectedCollectionName, collectionsDir, config);
-
-                  // Cache metadata in config.json
-                  if (metadata.namespace && metadata.collectionName) {
-                    const updatedConfig = { ...config, namespace: metadata.namespace, collectionName: metadata.collectionName };
-                    await saveConfig(updatedConfig);
-                  }
-
-                  resolve({
-                    success: true,
-                    output: output + (metadata.namespace && metadata.collectionName ? `\n\nDetected namespace: ${metadata.namespace}, collection: ${metadata.collectionName}` : ''),
-                    warnings: warnings,
-                    namespace: metadata.namespace,
-                    collectionName: metadata.collectionName
-                  });
-                } catch (metadataError: any) {
-                  // If we can't read metadata, still resolve as success since installation worked
-                  console.warn('Failed to read collection metadata:', metadataError);
-                  const fallbackMetadata = await extractCollectionMetadata(output, expectedNamespace, expectedCollectionName, collectionsDir, config).catch(() => ({
-                    namespace: expectedNamespace || config.namespace,
-                    collectionName: expectedCollectionName || config.collectionName
-                  }));
-
-                  // Cache fallback metadata in config.json if available
-                  if (fallbackMetadata.namespace && fallbackMetadata.collectionName) {
-                    const updatedConfig = { ...config, namespace: fallbackMetadata.namespace, collectionName: fallbackMetadata.collectionName };
-                    await saveConfig(updatedConfig).catch(err => console.warn('Failed to save fallback metadata to config:', err));
-                  }
-
-                  resolve({
-                    success: true,
-                    output: output,
-                    warnings: warnings,
-                    namespace: fallbackMetadata.namespace,
-                    collectionName: fallbackMetadata.collectionName
-                  });
-                }
-              })();
+            if (isContainerError && config.executionEnvironment) {
+              // Fallback to local ansible-galaxy
+              tryInstallLocally(cockpit, collectionSpec, collectionsDir, config, expectedNamespace, expectedCollectionName)
+                .then(result => resolve(result))
+                .catch(localError => {
+                  reject(new Error(`Collection installation failed (container and local): ${localError?.message || localError}`));
+                });
             } else {
-              // No success indicators and non-zero exit code - treat as failure
-              const errorMsg = output || `Collection installation failed with exit code ${exitCode}`;
-              console.error('ansible-galaxy install failed:', errorMsg, 'Exit code:', exitCode);
-              reject(new Error(`Failed to install collection: ${errorMsg}`));
+              // Not a container error, or no execution environment configured - reject
+              reject(containerError);
             }
           });
+      })
+      .catch((error: any) => {
+        const exitStatus = error?.exit_status ?? error?.exitStatus;
+        let errorMsg = error?.message || error?.toString() || String(error);
 
-          (installProcess as any).fail((error: any) => {
-            if (hasResolved) return;
-            hasResolved = true;
-            const exitStatus = error?.exit_status ?? error?.exitStatus;
-            let errorMsg = outputBuffer.trim();
-
-            if (!errorMsg && exitStatus !== undefined) {
-              switch (exitStatus) {
-                case 1:
-                  errorMsg = 'Collection installation failed. Check collection source and execution environment.';
-                  break;
-                case 125:
-                  errorMsg = 'Container execution failed. Check execution environment configuration.';
-                  break;
-                default:
-                  errorMsg = `Collection installation failed with exit code ${exitStatus}`;
-              }
-            }
-
-            if (!errorMsg) {
-              errorMsg = error?.message || error?.toString() || String(error) || 'Unknown error';
-            }
-
-            console.error('ansible-galaxy install process failed:', error, 'Exit status:', exitStatus, 'Output:', outputBuffer);
-            reject(new Error(`Failed to install collection: ${errorMsg}`));
-          });
+        if (exitStatus !== undefined) {
+          errorMsg = `Failed to create collections directory (exit code ${exitStatus}). ${errorMsg || 'Check permissions and disk space.'}`;
+        } else if (!errorMsg) {
+          errorMsg = 'Failed to create collections directory. Check permissions and disk space.';
         }
 
-        // Fallback to promise chain
-        installProcess.then(() => {
-          if (!hasResolved) {
-            hasResolved = true;
-            const output = outputBuffer.trim();
-            const warnings: string[] = [];
-            const lines = output.split('\n');
-            lines.forEach(line => {
-              if (line.includes('[WARNING]') || line.includes('WARNING:')) {
-                warnings.push(line.trim());
-              }
-            });
+        console.error('Failed to create collections directory:', error, 'Exit status:', exitStatus);
+        reject(new Error(`Failed to install collection: ${errorMsg}`));
+      });
+  });
+}
 
-            // Check for success indicators in output
-            const successIndicators = ['was installed successfully', 'Installed successfully'];
-            const hasSuccess = successIndicators.some(indicator => output.includes(indicator));
+// Helper function to install collection using container
+function tryInstallWithContainer(
+  cockpit: any,
+  collectionSpec: string,
+  collectionsDir: string,
+  config: CatalogConfig,
+  expectedNamespace: string | undefined,
+  expectedCollectionName: string | undefined
+): Promise<SyncCatalogResult> {
+  return new Promise((resolve, reject) => {
+    if (!config.executionEnvironment) {
+      reject(new Error('Execution environment is required for container installation'));
+      return;
+    }
 
-            if (hasSuccess) {
-              // Try to extract metadata and cache it in config.json
-              (async () => {
-                try {
-                  const metadata = await extractCollectionMetadata(output, expectedNamespace, expectedCollectionName, collectionsDir, config);
+    // Get current user's UID and cockpit-demo-ops group GID to run container as non-root
+    // This ensures the container user can write to directories owned by root:cockpit-demo-ops
+    let uidOutput = '';
+    let gidOutput = '';
+    let uid = '';
+    let gid = '';
 
-                  // Cache metadata in config.json
-                  if (metadata.namespace && metadata.collectionName) {
-                    const updatedConfig = { ...config, namespace: metadata.namespace, collectionName: metadata.collectionName };
-                    await saveConfig(updatedConfig);
-                  }
+    // Define installation function that will be called after UID/GID are retrieved
+    function runInstallation() {
+      let outputBuffer = '';
+      let hasResolved = false;
 
-                  resolve({
-                    success: true,
-                    output: output + (metadata.namespace && metadata.collectionName ? `\n\nDetected namespace: ${metadata.namespace}, collection: ${metadata.collectionName}` : ''),
-                    warnings: warnings,
-                    namespace: metadata.namespace,
-                    collectionName: metadata.collectionName
-                  });
-                } catch (metadataError: any) {
-                  console.warn('Failed to read collection metadata:', metadataError);
-                  const fallbackMetadata = await extractCollectionMetadata(output, expectedNamespace, expectedCollectionName, collectionsDir, config).catch(() => ({
-                    namespace: expectedNamespace || config.namespace,
-                    collectionName: expectedCollectionName || config.collectionName
-                  }));
+      // Build ansible-galaxy command
+      const ansibleGalaxyCmd = [
+        'bash', '-c',
+        `export PATH="/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin:$HOME/.local/bin:$PATH" && ` +
+        `ansible-galaxy collection install "${collectionSpec}" ` +
+        `--collections-path "${collectionsDir}" ` +
+        `--force`
+      ];
 
-                  // Cache fallback metadata in config.json if available
-                  if (fallbackMetadata.namespace && fallbackMetadata.collectionName) {
-                    const updatedConfig = { ...config, namespace: fallbackMetadata.namespace, collectionName: fallbackMetadata.collectionName };
-                    await saveConfig(updatedConfig).catch(err => console.warn('Failed to save fallback metadata to config:', err));
-                  }
+      // Execute in execution environment using podman/docker
+      // Note: Directories are pre-labeled with container_file_t during setup
+      // so we don't need :Z flag (which requires root to relabel)
+      // Use --user to run as current user with cockpit-demo-ops group, allowing write access to group-owned directories
+      // --group-add keep-groups preserves group membership from the host
+      const installCmd = [
+        'podman', 'run', '--rm',
+        '--user', `${uid}:${gid}`,
+        '--group-add', 'keep-groups',
+        '-v', `${collectionsDir}:${collectionsDir}`,
+        '-v', '/usr/share/cockpit-plugin-demos/meta:/usr/share/cockpit-plugin-demos/meta:ro',
+        config.executionEnvironment!,
+        ...ansibleGalaxyCmd
+      ];
 
-                  resolve({
-                    success: true,
-                    output: output,
-                    warnings: warnings,
-                    namespace: fallbackMetadata.namespace,
-                    collectionName: fallbackMetadata.collectionName
-                  });
-                }
-              })();
-            } else {
-              resolve({
-                success: false,
-                output: output,
-                warnings: warnings,
-                namespace: expectedNamespace || config.namespace,
-                collectionName: expectedCollectionName || config.collectionName
-              });
-            }
-          }
-        }).catch((error: any) => {
-          // Even if promise rejects, check output for success indicators
+      const installProcess = cockpit.spawn(installCmd, { err: 'out' });
+
+      installProcess.stream((data: string) => {
+        outputBuffer += data;
+        console.log('ansible-galaxy output:', data);
+      });
+
+      // Handle process completion
+      if (typeof (installProcess as any).done === 'function') {
+        (installProcess as any).done((exitCode: number) => {
+          if (hasResolved) return;
+          hasResolved = true;
           const output = outputBuffer.trim();
+
+          // Parse warnings from output
+          const warnings: string[] = [];
+          const lines = output.split('\n');
+          lines.forEach(line => {
+            if (line.includes('[WARNING]') || line.includes('WARNING:')) {
+              warnings.push(line.trim());
+            }
+          });
+
+          // Check for success indicators in output first, regardless of exit code
+          // ansible-galaxy may exit with non-zero code even on success if warnings are present
           const successIndicators = ['was installed successfully', 'Installed successfully'];
           const hasSuccess = successIndicators.some(indicator => output.includes(indicator));
 
-          if (hasSuccess && !hasResolved) {
-            hasResolved = true;
-            const warnings: string[] = [];
-            const lines = output.split('\n');
-            lines.forEach(line => {
-              if (line.includes('[WARNING]') || line.includes('WARNING:')) {
-                warnings.push(line.trim());
-              }
-            });
+          if (hasSuccess || exitCode === 0) {
+            // Installation succeeded - now extract metadata and cache it in config.json
+            (async () => {
+              try {
+                const metadata = await extractCollectionMetadata(output, expectedNamespace, expectedCollectionName, collectionsDir, config);
 
+                // Cache metadata in config.json
+                if (metadata.namespace && metadata.collectionName) {
+                  const updatedConfig = { ...config, namespace: metadata.namespace, collectionName: metadata.collectionName };
+                  await saveConfig(updatedConfig);
+                }
+
+                resolve({
+                  success: true,
+                  output: output + (metadata.namespace && metadata.collectionName ? `\n\nDetected namespace: ${metadata.namespace}, collection: ${metadata.collectionName}` : ''),
+                  warnings: warnings,
+                  namespace: metadata.namespace,
+                  collectionName: metadata.collectionName
+                });
+              } catch (metadataError: any) {
+                // If we can't read metadata, still resolve as success since installation worked
+                console.warn('Failed to read collection metadata:', metadataError);
+                const fallbackMetadata = await extractCollectionMetadata(output, expectedNamespace, expectedCollectionName, collectionsDir, config).catch(() => ({
+                  namespace: expectedNamespace || config.namespace,
+                  collectionName: expectedCollectionName || config.collectionName
+                }));
+
+                // Cache fallback metadata in config.json if available
+                if (fallbackMetadata.namespace && fallbackMetadata.collectionName) {
+                  const updatedConfig = { ...config, namespace: fallbackMetadata.namespace, collectionName: fallbackMetadata.collectionName };
+                  await saveConfig(updatedConfig).catch(err => console.warn('Failed to save fallback metadata to config:', err));
+                }
+
+                resolve({
+                  success: true,
+                  output: output,
+                  warnings: warnings,
+                  namespace: fallbackMetadata.namespace,
+                  collectionName: fallbackMetadata.collectionName
+                });
+              }
+            })();
+          } else {
+            // No success indicators and non-zero exit code - treat as failure
+            const errorMsg = output || `Collection installation failed with exit code ${exitCode}`;
+            console.error('ansible-galaxy install failed:', errorMsg, 'Exit code:', exitCode);
+            reject(new Error(`Failed to install collection: ${errorMsg}`));
+          }
+        });
+
+        (installProcess as any).fail((error: any) => {
+          if (hasResolved) return;
+          hasResolved = true;
+          const exitStatus = error?.exit_status ?? error?.exitStatus;
+          let errorMsg = outputBuffer.trim();
+
+          if (!errorMsg && exitStatus !== undefined) {
+            switch (exitStatus) {
+              case 1:
+                errorMsg = 'Collection installation failed. Check collection source and execution environment.';
+                break;
+              case 125:
+                errorMsg = 'Container execution failed. Check execution environment configuration.';
+                break;
+              default:
+                errorMsg = `Collection installation failed with exit code ${exitStatus}`;
+            }
+          }
+
+          if (!errorMsg) {
+            errorMsg = error?.message || error?.toString() || String(error) || 'Unknown error';
+          }
+
+          console.error('ansible-galaxy install process failed:', error, 'Exit status:', exitStatus, 'Output:', outputBuffer);
+          reject(new Error(`Failed to install collection: ${errorMsg}`));
+        });
+      }
+
+      // Fallback to promise chain
+      installProcess.then(() => {
+        if (!hasResolved) {
+          hasResolved = true;
+          const output = outputBuffer.trim();
+          const warnings: string[] = [];
+          const lines = output.split('\n');
+          lines.forEach(line => {
+            if (line.includes('[WARNING]') || line.includes('WARNING:')) {
+              warnings.push(line.trim());
+            }
+          });
+
+          // Check for success indicators in output
+          const successIndicators = ['was installed successfully', 'Installed successfully'];
+          const hasSuccess = successIndicators.some(indicator => output.includes(indicator));
+
+          if (hasSuccess) {
             // Try to extract metadata and cache it in config.json
             (async () => {
               try {
@@ -645,49 +651,425 @@ export async function syncCatalog(config: CatalogConfig): Promise<SyncCatalogRes
                 });
               }
             })();
-            return;
+          } else {
+            resolve({
+              success: false,
+              output: output,
+              warnings: warnings,
+              namespace: expectedNamespace || config.namespace,
+              collectionName: expectedCollectionName || config.collectionName
+            });
           }
+        }
+      }).catch((error: any) => {
+        // Even if promise rejects, check output for success indicators
+        const output = outputBuffer.trim();
+        const successIndicators = ['was installed successfully', 'Installed successfully'];
+        const hasSuccess = successIndicators.some(indicator => output.includes(indicator));
 
-          if (!hasResolved) {
-            hasResolved = true;
-            const exitStatus = error?.exit_status ?? error?.exitStatus;
-            let errorMsg = outputBuffer.trim();
+        if (hasSuccess && !hasResolved) {
+          hasResolved = true;
+          const warnings: string[] = [];
+          const lines = output.split('\n');
+          lines.forEach(line => {
+            if (line.includes('[WARNING]') || line.includes('WARNING:')) {
+              warnings.push(line.trim());
+            }
+          });
 
-            if (!errorMsg && exitStatus !== undefined) {
-              switch (exitStatus) {
-                case 1:
-                  errorMsg = 'Collection installation failed. Check collection source and execution environment.';
-                  break;
-                case 125:
-                  errorMsg = 'Container execution failed. Check execution environment configuration.';
-                  break;
-                default:
-                  errorMsg = `Collection installation failed with exit code ${exitStatus}`;
+          // Try to extract metadata and cache it in config.json
+          (async () => {
+            try {
+              const metadata = await extractCollectionMetadata(output, expectedNamespace, expectedCollectionName, collectionsDir, config);
+
+              // Cache metadata in config.json
+              if (metadata.namespace && metadata.collectionName) {
+                const updatedConfig = { ...config, namespace: metadata.namespace, collectionName: metadata.collectionName };
+                await saveConfig(updatedConfig);
               }
+
+              resolve({
+                success: true,
+                output: output + (metadata.namespace && metadata.collectionName ? `\n\nDetected namespace: ${metadata.namespace}, collection: ${metadata.collectionName}` : ''),
+                warnings: warnings,
+                namespace: metadata.namespace,
+                collectionName: metadata.collectionName
+              });
+            } catch (metadataError: any) {
+              console.warn('Failed to read collection metadata:', metadataError);
+              const fallbackMetadata = await extractCollectionMetadata(output, expectedNamespace, expectedCollectionName, collectionsDir, config).catch(() => ({
+                namespace: expectedNamespace || config.namespace,
+                collectionName: expectedCollectionName || config.collectionName
+              }));
+
+              // Cache fallback metadata in config.json if available
+              if (fallbackMetadata.namespace && fallbackMetadata.collectionName) {
+                const updatedConfig = { ...config, namespace: fallbackMetadata.namespace, collectionName: fallbackMetadata.collectionName };
+                await saveConfig(updatedConfig).catch(err => console.warn('Failed to save fallback metadata to config:', err));
+              }
+
+              resolve({
+                success: true,
+                output: output,
+                warnings: warnings,
+                namespace: fallbackMetadata.namespace,
+                collectionName: fallbackMetadata.collectionName
+              });
             }
-
-            if (!errorMsg) {
-              errorMsg = error?.message || error?.toString() || String(error) || 'Collection installation failed';
-            }
-
-            console.error('ansible-galaxy install failed:', error, 'Exit status:', exitStatus, 'Output:', outputBuffer);
-            reject(new Error(`Failed to install collection: ${errorMsg}`));
-          }
-        });
-      })
-      .catch((error: any) => {
-        const exitStatus = error?.exit_status ?? error?.exitStatus;
-        let errorMsg = error?.message || error?.toString() || String(error);
-
-        if (exitStatus !== undefined) {
-          errorMsg = `Failed to create collections directory (exit code ${exitStatus}). ${errorMsg || 'Check permissions and disk space.'}`;
-        } else if (!errorMsg) {
-          errorMsg = 'Failed to create collections directory. Check permissions and disk space.';
+          })();
+          return;
         }
 
-        console.error('Failed to create collections directory:', error, 'Exit status:', exitStatus);
-        reject(new Error(`Failed to install collection: ${errorMsg}`));
+        if (!hasResolved) {
+          hasResolved = true;
+          const exitStatus = error?.exit_status ?? error?.exitStatus;
+          let errorMsg = outputBuffer.trim();
+
+          if (!errorMsg && exitStatus !== undefined) {
+            switch (exitStatus) {
+              case 1:
+                errorMsg = 'Collection installation failed. Check collection source and execution environment.';
+                break;
+              case 125:
+                errorMsg = 'Container execution failed. Check execution environment configuration.';
+                break;
+              default:
+                errorMsg = `Collection installation failed with exit code ${exitStatus}`;
+            }
+          }
+
+          if (!errorMsg) {
+            errorMsg = error?.message || error?.toString() || String(error) || 'Collection installation failed';
+          }
+
+          console.error('ansible-galaxy install failed:', error, 'Exit status:', exitStatus, 'Output:', outputBuffer);
+          reject(new Error(`Failed to install collection: ${errorMsg}`));
+        }
       });
+    }
+
+    const uidProcess = cockpit.spawn(['id', '-u'], { err: 'out' });
+    uidProcess.stream((data: string) => { uidOutput += data; });
+
+    uidProcess.then(() => {
+      uid = uidOutput.trim();
+      // Get GID of cockpit-demo-ops group (not user's primary GID)
+      // This ensures the container user has the right group to write to group-owned directories
+      const gidProcess = cockpit.spawn(['getent', 'group', 'cockpit-demo-ops'], { err: 'out' });
+      gidProcess.stream((data: string) => { gidOutput += data; });
+
+      gidProcess.then(() => {
+        // Parse GID from getent output (format: groupname:password:GID:members)
+        const parts = gidOutput.trim().split(':');
+        gid = parts.length >= 3 ? parts[2] : '';
+
+        // Fallback to user's primary GID if group lookup fails
+        if (!gid) {
+          const fallbackGidProcess = cockpit.spawn(['id', '-g'], { err: 'out' });
+          let fallbackGidOutput = '';
+          fallbackGidProcess.stream((data: string) => { fallbackGidOutput += data; });
+          return fallbackGidProcess.then(() => {
+            gid = fallbackGidOutput.trim();
+            if (!uid || !gid) {
+              reject(new Error('Failed to get current user UID/GID'));
+              return;
+            }
+            // Continue with installation
+            runInstallation();
+          }).catch((error2: any) => {
+            reject(new Error(`Failed to get GID: ${error2?.message || error2}`));
+          });
+        } else {
+          if (!uid || !gid) {
+            reject(new Error('Failed to get current user UID or cockpit-demo-ops group GID'));
+            return;
+          }
+          // Continue with installation
+          runInstallation();
+        }
+      }).catch(() => {
+        // If getent fails, try fallback to user's primary GID
+        const fallbackGidProcess = cockpit.spawn(['id', '-g'], { err: 'out' });
+        let fallbackGidOutput = '';
+        fallbackGidProcess.stream((data: string) => { fallbackGidOutput += data; });
+        fallbackGidProcess.then(() => {
+          gid = fallbackGidOutput.trim();
+          if (!uid || !gid) {
+            reject(new Error('Failed to get current user UID/GID'));
+            return;
+          }
+          runInstallation();
+        }).catch((error2: any) => {
+          reject(new Error(`Failed to get GID: ${error2?.message || error2}`));
+        });
+      });
+    }).catch((error: any) => {
+      reject(new Error(`Failed to get UID: ${error?.message || error}`));
+    });
+  });
+}
+
+// Helper function to install collection using local ansible-galaxy
+function tryInstallLocally(
+  cockpit: any,
+  collectionSpec: string,
+  collectionsDir: string,
+  config: CatalogConfig,
+  expectedNamespace: string | undefined,
+  expectedCollectionName: string | undefined
+): Promise<SyncCatalogResult> {
+  return new Promise((resolve, reject) => {
+    let outputBuffer = '';
+    let hasResolved = false;
+
+    // Build ansible-galaxy command to run directly on host
+    const ansibleGalaxyCmd = [
+      'bash', '-c',
+      `export PATH="/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin:$HOME/.local/bin:$PATH" && ` +
+      `ansible-galaxy collection install "${collectionSpec}" ` +
+      `--collections-path "${collectionsDir}" ` +
+      `--force`
+    ];
+
+    const installProcess = cockpit.spawn(ansibleGalaxyCmd, { err: 'out' });
+
+    installProcess.stream((data: string) => {
+      outputBuffer += data;
+      console.log('ansible-galaxy (local) output:', data);
+    });
+
+    // Handle process completion
+    if (typeof (installProcess as any).done === 'function') {
+      (installProcess as any).done((exitCode: number) => {
+        if (hasResolved) return;
+        hasResolved = true;
+        const output = outputBuffer.trim();
+
+        // Parse warnings from output
+        const warnings: string[] = [];
+        const lines = output.split('\n');
+        lines.forEach(line => {
+          if (line.includes('[WARNING]') || line.includes('WARNING:')) {
+            warnings.push(line.trim());
+          }
+        });
+
+        // Check for success indicators in output first, regardless of exit code
+        const successIndicators = ['was installed successfully', 'Installed successfully'];
+        const hasSuccess = successIndicators.some(indicator => output.includes(indicator));
+
+        if (hasSuccess || exitCode === 0) {
+          // Installation succeeded - now extract metadata and cache it in config.json
+          (async () => {
+            try {
+              const metadata = await extractCollectionMetadata(output, expectedNamespace, expectedCollectionName, collectionsDir, config);
+
+              // Cache metadata in config.json
+              if (metadata.namespace && metadata.collectionName) {
+                const updatedConfig = { ...config, namespace: metadata.namespace, collectionName: metadata.collectionName };
+                await saveConfig(updatedConfig);
+              }
+
+              resolve({
+                success: true,
+                output: output + (metadata.namespace && metadata.collectionName ? `\n\nDetected namespace: ${metadata.namespace}, collection: ${metadata.collectionName}` : ''),
+                warnings: warnings,
+                namespace: metadata.namespace,
+                collectionName: metadata.collectionName
+              });
+            } catch (metadataError: any) {
+              console.warn('Failed to read collection metadata:', metadataError);
+              const fallbackMetadata = await extractCollectionMetadata(output, expectedNamespace, expectedCollectionName, collectionsDir, config).catch(() => ({
+                namespace: expectedNamespace || config.namespace,
+                collectionName: expectedCollectionName || config.collectionName
+              }));
+
+              // Cache fallback metadata in config.json if available
+              if (fallbackMetadata.namespace && fallbackMetadata.collectionName) {
+                const updatedConfig = { ...config, namespace: fallbackMetadata.namespace, collectionName: fallbackMetadata.collectionName };
+                await saveConfig(updatedConfig).catch(err => console.warn('Failed to save fallback metadata to config:', err));
+              }
+
+              resolve({
+                success: true,
+                output: output,
+                warnings: warnings,
+                namespace: fallbackMetadata.namespace,
+                collectionName: fallbackMetadata.collectionName
+              });
+            }
+          })();
+        } else {
+          // No success indicators and non-zero exit code - treat as failure
+          const errorMsg = output || `Collection installation failed with exit code ${exitCode}`;
+          console.error('ansible-galaxy (local) install failed:', errorMsg, 'Exit code:', exitCode);
+          reject(new Error(`Failed to install collection locally: ${errorMsg}`));
+        }
+      });
+
+      (installProcess as any).fail((error: any) => {
+        if (hasResolved) return;
+        hasResolved = true;
+        const exitStatus = error?.exit_status ?? error?.exitStatus;
+        let errorMsg = outputBuffer.trim();
+
+        if (!errorMsg && exitStatus !== undefined) {
+          errorMsg = `Local ansible-galaxy installation failed with exit code ${exitStatus}`;
+        }
+
+        if (!errorMsg) {
+          errorMsg = error?.message || error?.toString() || String(error) || 'Unknown error';
+        }
+
+        console.error('ansible-galaxy (local) install process failed:', error, 'Exit status:', exitStatus, 'Output:', outputBuffer);
+        reject(new Error(`Failed to install collection locally: ${errorMsg}`));
+      });
+    }
+
+    // Fallback to promise chain
+    installProcess.then(() => {
+      if (!hasResolved) {
+        hasResolved = true;
+        const output = outputBuffer.trim();
+        const warnings: string[] = [];
+        const lines = output.split('\n');
+        lines.forEach(line => {
+          if (line.includes('[WARNING]') || line.includes('WARNING:')) {
+            warnings.push(line.trim());
+          }
+        });
+
+        // Check for success indicators in output
+        const successIndicators = ['was installed successfully', 'Installed successfully'];
+        const hasSuccess = successIndicators.some(indicator => output.includes(indicator));
+
+        if (hasSuccess) {
+          // Try to extract metadata and cache it in config.json
+          (async () => {
+            try {
+              const metadata = await extractCollectionMetadata(output, expectedNamespace, expectedCollectionName, collectionsDir, config);
+
+              // Cache metadata in config.json
+              if (metadata.namespace && metadata.collectionName) {
+                const updatedConfig = { ...config, namespace: metadata.namespace, collectionName: metadata.collectionName };
+                await saveConfig(updatedConfig);
+              }
+
+              resolve({
+                success: true,
+                output: output + (metadata.namespace && metadata.collectionName ? `\n\nDetected namespace: ${metadata.namespace}, collection: ${metadata.collectionName}` : ''),
+                warnings: warnings,
+                namespace: metadata.namespace,
+                collectionName: metadata.collectionName
+              });
+            } catch (metadataError: any) {
+              console.warn('Failed to read collection metadata:', metadataError);
+              const fallbackMetadata = await extractCollectionMetadata(output, expectedNamespace, expectedCollectionName, collectionsDir, config).catch(() => ({
+                namespace: expectedNamespace || config.namespace,
+                collectionName: expectedCollectionName || config.collectionName
+              }));
+
+              // Cache fallback metadata in config.json if available
+              if (fallbackMetadata.namespace && fallbackMetadata.collectionName) {
+                const updatedConfig = { ...config, namespace: fallbackMetadata.namespace, collectionName: fallbackMetadata.collectionName };
+                await saveConfig(updatedConfig).catch(err => console.warn('Failed to save fallback metadata to config:', err));
+              }
+
+              resolve({
+                success: true,
+                output: output,
+                warnings: warnings,
+                namespace: fallbackMetadata.namespace,
+                collectionName: fallbackMetadata.collectionName
+              });
+            }
+          })();
+        } else {
+          resolve({
+            success: false,
+            output: output,
+            warnings: warnings,
+            namespace: expectedNamespace || config.namespace,
+            collectionName: expectedCollectionName || config.collectionName
+          });
+        }
+      }
+    }).catch((error: any) => {
+      // Even if promise rejects, check output for success indicators
+      const output = outputBuffer.trim();
+      const successIndicators = ['was installed successfully', 'Installed successfully'];
+      const hasSuccess = successIndicators.some(indicator => output.includes(indicator));
+
+      if (hasSuccess && !hasResolved) {
+        hasResolved = true;
+        const warnings: string[] = [];
+        const lines = output.split('\n');
+        lines.forEach(line => {
+          if (line.includes('[WARNING]') || line.includes('WARNING:')) {
+            warnings.push(line.trim());
+          }
+        });
+
+        // Try to extract metadata and cache it in config.json
+        (async () => {
+          try {
+            const metadata = await extractCollectionMetadata(output, expectedNamespace, expectedCollectionName, collectionsDir, config);
+
+            // Cache metadata in config.json
+            if (metadata.namespace && metadata.collectionName) {
+              const updatedConfig = { ...config, namespace: metadata.namespace, collectionName: metadata.collectionName };
+              await saveConfig(updatedConfig);
+            }
+
+            resolve({
+              success: true,
+              output: output + (metadata.namespace && metadata.collectionName ? `\n\nDetected namespace: ${metadata.namespace}, collection: ${metadata.collectionName}` : ''),
+              warnings: warnings,
+              namespace: metadata.namespace,
+              collectionName: metadata.collectionName
+            });
+          } catch (metadataError: any) {
+            console.warn('Failed to read collection metadata:', metadataError);
+            const fallbackMetadata = await extractCollectionMetadata(output, expectedNamespace, expectedCollectionName, collectionsDir, config).catch(() => ({
+              namespace: expectedNamespace || config.namespace,
+              collectionName: expectedCollectionName || config.collectionName
+            }));
+
+            // Cache fallback metadata in config.json if available
+            if (fallbackMetadata.namespace && fallbackMetadata.collectionName) {
+              const updatedConfig = { ...config, namespace: fallbackMetadata.namespace, collectionName: fallbackMetadata.collectionName };
+              await saveConfig(updatedConfig).catch(err => console.warn('Failed to save fallback metadata to config:', err));
+            }
+
+            resolve({
+              success: true,
+              output: output,
+              warnings: warnings,
+              namespace: fallbackMetadata.namespace,
+              collectionName: fallbackMetadata.collectionName
+            });
+          }
+        })();
+        return;
+      }
+
+      if (!hasResolved) {
+        hasResolved = true;
+        const exitStatus = error?.exit_status ?? error?.exitStatus;
+        let errorMsg = outputBuffer.trim();
+
+        if (!errorMsg && exitStatus !== undefined) {
+          errorMsg = `Local ansible-galaxy installation failed with exit code ${exitStatus}`;
+        }
+
+        if (!errorMsg) {
+          errorMsg = error?.message || error?.toString() || String(error) || 'Collection installation failed';
+        }
+
+        console.error('ansible-galaxy (local) install failed:', error, 'Exit status:', exitStatus, 'Output:', outputBuffer);
+        reject(new Error(`Failed to install collection locally: ${errorMsg}`));
+      }
+    });
   });
 }
 

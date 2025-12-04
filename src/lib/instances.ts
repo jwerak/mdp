@@ -54,7 +54,8 @@ export async function createInstance(
 
   return new Promise((resolve, reject) => {
     const cockpit = getCockpit();
-    cockpit.spawn(['mkdir', '-p', instancePath], { err: 'out' })
+    // Create instance directory with cockpit-demo-ops group and 775 permissions
+    cockpit.spawn(['bash', '-c', `umask 002 && install -d -g cockpit-demo-ops -m 775 "${instancePath}"`], { err: 'out' })
       .then(() => {
         return cockpit.file(specPath).replace(JSON.stringify(spec, null, 2));
       })
@@ -83,7 +84,18 @@ export async function getInstance(instanceId: string): Promise<Instance> {
       .then(([specContent, statusContent]) => {
         try {
           const spec: InstanceSpec = JSON.parse(specContent);
-          const status: InstanceStatus = JSON.parse(statusContent);
+          let status: InstanceStatus | null = null;
+          try {
+            status = JSON.parse(statusContent);
+            // If status parsed to null or undefined, set to null explicitly
+            if (!status) {
+              status = null;
+            }
+          } catch (statusError) {
+            // If status parsing fails, set to null and continue
+            console.warn(`Failed to parse status for instance ${instanceId}, using null:`, statusError);
+            status = null;
+          }
           resolve({ id: instanceId, spec, status });
         } catch (error: any) {
           reject(new Error(`Failed to parse instance data: ${error.message}`));
@@ -100,7 +112,8 @@ export async function getAllInstances(): Promise<Instance[]> {
     const cockpit = getCockpit();
 
     // Ensure the directory exists first
-    cockpit.spawn(['mkdir', '-p', INSTANCES_PATH], { err: 'out' })
+    // Create instances directory with cockpit-demo-ops group and 775 permissions
+    cockpit.spawn(['bash', '-c', `umask 002 && install -d -g cockpit-demo-ops -m 775 "${INSTANCES_PATH}"`], { err: 'out' })
       .then(() => {
         // Use ls command directly as file.list() may not work reliably for directories
         let outputBuffer = '';
@@ -357,19 +370,25 @@ export async function executeInstance(
 
   // systemd-run --user doesn't inherit full PATH, so we wrap in bash with explicit PATH
   // This ensures ansible-navigator can be found in common installation locations
-  // Run ansible-navigator from BASE_PATH so it automatically mounts the working directory
+  // Run ansible-navigator from BASE_PATH so it automatically mounts the working directory (collections)
   // ANSIBLE_CONFIG environment variable points to ansible.cfg which configures collections_paths
-  // Using relative path since ansible-navigator mounts BASE_PATH as working directory
+  // Using absolute paths for meta files located in /usr/share/cockpit-plugin-demos/meta/
   // The ansible.cfg file configures collections_paths to include /var/lib/cockpit-plugin-demos/collections
+  // ansible-navigator automatically mounts directories referenced by absolute paths (playbook, config)
+  // Save artifacts to instance directory and disable playbook artifact to avoid permission issues
+  const artifactPath = `${INSTANCES_PATH}/${instanceId}/artifacts`;
   const ansibleNavigatorCmd = [
     'bash', '-c',
     `export PATH="/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin:$HOME/.local/bin:$PATH" && ` +
-    `export ANSIBLE_CONFIG="meta/ansible.cfg" && ` +
-    `ansible-navigator run "meta/meta_playbook.yml" ` +
+    `export ANSIBLE_CONFIG="/usr/share/cockpit-plugin-demos/meta/ansible.cfg" && ` +
+    `mkdir -p "${artifactPath}" && ` +
+    `ansible-navigator run "/usr/share/cockpit-plugin-demos/meta/meta_playbook.yml" ` +
     `--eei "${config.executionEnvironment}" ` +
     `--extra-vars '${JSON.stringify(extraVars)}' ` +
     `--mode stdout ` +
-    `--pull-policy missing`
+    `--pull-policy missing ` +
+    `--pae false ` +
+    `--lf "${artifactPath}/ansible-navigator.log"`
   ];
 
   const systemdRunArgs = [

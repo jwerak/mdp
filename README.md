@@ -9,7 +9,11 @@ Cockpit plugin for deploying and managing demo deployments from Ansible Collecti
 - Cockpit installed and running
 - User must be member of `cockpit-demo-ops` group
 - Node.js and npm for building
-- Git access to Ansible Collection repository
+- Podman (or Docker) installed and configured for non-root user
+- Ansible Execution Environment (EE) container image with `ansible-galaxy` command
+  - Example: `quay.io/ansible/ansible-navigator:latest`
+  - Or: `ghcr.io/ansible/community-ansible-dev-tools`
+- Git access to Ansible Collection repository (if installing from Git)
 
 ### Setup Group and Permissions
 
@@ -33,10 +37,52 @@ Cockpit plugin for deploying and managing demo deployments from Ansible Collecti
 
 4. **Create and set permissions for data directory:**
    ```bash
-   sudo mkdir -p /var/lib/cockpit-plugin-demos
+   # Create directories with root ownership
+   sudo mkdir -p /var/lib/cockpit-plugin-demos/collections/ansible_collections
+
+   # Set ownership and permissions
    sudo chown root:cockpit-demo-ops /var/lib/cockpit-plugin-demos
    sudo chmod 775 /var/lib/cockpit-plugin-demos
+   sudo chown -R root:cockpit-demo-ops /var/lib/cockpit-plugin-demos/collections
+   sudo chmod -R 775 /var/lib/cockpit-plugin-demos/collections
+
+   # Set setgid bit on collections directory to ensure new subdirectories inherit group
+   sudo chmod g+s /var/lib/cockpit-plugin-demos/collections
+   sudo chmod g+s /var/lib/cockpit-plugin-demos/collections/ansible_collections
+
+   # If directories were previously created by a user, fix ownership and setgid recursively
+   sudo chown -R root:cockpit-demo-ops /var/lib/cockpit-plugin-demos/collections
+   sudo chmod -R 775 /var/lib/cockpit-plugin-demos/collections
+   sudo find /var/lib/cockpit-plugin-demos/collections -type d -exec chmod g+s {} \;
    ```
+
+5. **Set SELinux context for data directory:**
+   ```bash
+   # Set the base SELinux context (var_lib_t is standard for /var/lib directories)
+   sudo chcon -R -t var_lib_t /var/lib/cockpit-plugin-demos
+
+   # Make the base context change permanent (adds policy if it doesn't exist)
+   sudo semanage fcontext -a -t var_lib_t "/var/lib/cockpit-plugin-demos(/.*)?" || \
+     sudo semanage fcontext -m -t var_lib_t "/var/lib/cockpit-plugin-demos(/.*)?"
+
+   # Pre-label collections directory that will be mounted into containers with container_file_t
+   # This allows non-root podman to access this directory without relabeling
+   sudo chcon -R -t container_file_t /var/lib/cockpit-plugin-demos/collections
+
+   # Make container_file_t context permanent for collections subdirectory
+   sudo semanage fcontext -a -t container_file_t "/var/lib/cockpit-plugin-demos/collections(/.*)?" || \
+     sudo semanage fcontext -m -t container_file_t "/var/lib/cockpit-plugin-demos/collections(/.*)?"
+
+   # Apply the policies recursively
+   sudo restorecon -R /var/lib/cockpit-plugin-demos
+
+   # Verify the contexts
+   ls -dZ /var/lib/cockpit-plugin-demos
+   ls -dZ /var/lib/cockpit-plugin-demos/collections
+   # Collections should show: ...object_r:container_file_t:s0
+   ```
+
+   **Note:** The collections directory is pre-labeled with `container_file_t` to allow non-root podman access without requiring relabeling permissions.
 
 ### Installation
 
@@ -50,7 +96,21 @@ Cockpit plugin for deploying and managing demo deployments from Ansible Collecti
    npm run build
    ```
 
-3. **Deploy to Cockpit:**
+3. **Install meta files:**
+   ```bash
+   # Create the meta directory for Ansible playbook and configuration
+   sudo mkdir -p /usr/share/cockpit-plugin-demos/meta
+
+   # Copy meta files from the source tree
+   sudo cp meta/meta_playbook.yml /usr/share/cockpit-plugin-demos/meta/
+   sudo cp meta/ansible.cfg /usr/share/cockpit-plugin-demos/meta/
+
+   # Set appropriate permissions (readable by all)
+   sudo chmod 644 /usr/share/cockpit-plugin-demos/meta/meta_playbook.yml
+   sudo chmod 644 /usr/share/cockpit-plugin-demos/meta/ansible.cfg
+   ```
+
+4. **Deploy to Cockpit:**
    ```bash
    # Create the plugin directory
    sudo mkdir -p /usr/share/cockpit/mdp
@@ -64,7 +124,7 @@ Cockpit plugin for deploying and managing demo deployments from Ansible Collecti
    # Should show mdp.js and chunk files
    ```
 
-4. **Verify deployment:**
+5. **Verify deployment:**
    ```bash
    # Check that files are in place
    ls -la /usr/share/cockpit/mdp/
@@ -77,7 +137,7 @@ Cockpit plugin for deploying and managing demo deployments from Ansible Collecti
    sudo systemctl restart cockpit
    ```
 
-5. **Clear browser cache:**
+6. **Clear browser cache:**
    - Hard refresh the Cockpit page (Ctrl+Shift+R or Cmd+Shift+R)
    - Or clear browser cache and reload
 
@@ -140,10 +200,21 @@ If "Demo Deployments" doesn't appear in the sidebar:
 1. Open Cockpit and navigate to **Demo Deployments** in the sidebar
 2. Go to **Settings** tab
 3. Configure:
-   - **Git Repository URL**: URL of your Ansible Collection repository
+   - **Execution Environment**: Container image for ansible-navigator (required)
+     - Example: `quay.io/ansible/ansible-navigator:latest`
+     - Must include `ansible-galaxy` command for collection installation
+   - **Git Repository URL**: URL of your Ansible Collection repository (if installing from Git)
    - **Namespace**: Collection namespace (default: `local`)
    - **Collection Name**: Name of your collection
-4. Click **Save & Sync Catalog** to clone/pull the repository
+   - **Use Local Collection**: Check if collection is already installed locally
+4. Click **Save & Sync Catalog** to install/sync the collection
+
+   **Collection Installation:**
+   - If installing from Git/Galaxy, collections are installed using `ansible-galaxy collection install`
+   - **Primary method:** Installation runs inside the execution environment container (for consistency with playbook execution)
+   - **Fallback method:** If container installation fails (e.g., SELinux permission issues), automatically falls back to running `ansible-galaxy` directly on the host (requires `ansible-galaxy` to be installed locally)
+   - Collections are installed to `/var/lib/cockpit-plugin-demos/collections/`
+   - Directories are pre-labeled with `container_file_t` during setup to allow non-root podman access
 
 ### Usage
 
@@ -165,15 +236,33 @@ If "Demo Deployments" doesn't appear in the sidebar:
 
 The plugin maintains this structure:
 
+**Static application files (read-only):**
+```
+/usr/share/cockpit-plugin-demos/
+└── meta/
+    ├── meta_playbook.yml    # Main execution playbook
+    └── ansible.cfg          # Ansible configuration with collection paths
+```
+
+**Cockpit plugin UI:**
+```
+/usr/share/cockpit/mdp/
+├── manifest.json
+├── mdp.html
+└── dist/
+    └── mdp.js (and other assets)
+```
+
+**Runtime data (variable):**
 ```
 /var/lib/cockpit-plugin-demos/
-├── catalog/
+├── collections/
 │   └── ansible_collections/
 │       └── <namespace>/
 │           └── <collection>/
 │               ├── galaxy.yml
 │               ├── demos.yaml
-│               └── playbooks/
+│               └── roles/ or playbooks/
 └── instances/
     └── <instance-id>/
         ├── spec.json

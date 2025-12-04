@@ -106,13 +106,14 @@ export const InstanceList: React.FC = () => {
   };
 
   const getDescription = (instance: Instance): string => {
-    if (instance.status.error) {
+    if (instance.status?.error) {
       return instance.status.error;
     }
-    if (instance.status.message) {
+    if (instance.status?.message) {
       return instance.status.message;
     }
-    return `Demo: ${instance.spec.demoName}`;
+    const demoName = instance.spec?.demoName || instance.spec?.demoId || 'Unknown';
+    return `Demo: ${demoName}`;
   };
 
   if (loading && instances.length === 0) {
@@ -164,15 +165,15 @@ export const InstanceList: React.FC = () => {
                   <Tr key={instance.id}>
                     <Td>
                       <div>
-                        <strong>{instance.spec.demoName}</strong>
+                        <strong>{instance.spec?.demoName || instance.spec?.demoId || instance.id}</strong>
                         <div style={{ fontSize: '0.875rem', color: 'var(--pf-v6-global--Color--200)' }}>
                           {instance.id}
                         </div>
                       </div>
                     </Td>
                     <Td>
-                      <Badge isRead={false} color={stateColors[instance.status.state] || 'default'}>
-                        {instance.status.state}
+                      <Badge isRead={false} color={stateColors[instance.status?.state || 'pending'] || 'default'}>
+                        {instance.status?.state || 'pending'}
                       </Badge>
                     </Td>
                     <Td>

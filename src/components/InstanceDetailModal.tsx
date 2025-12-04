@@ -68,13 +68,13 @@ export const InstanceDetailModal: React.FC<InstanceDetailModalProps> = ({ instan
                   </DescriptionListGroup>
                   <DescriptionListGroup>
                     <DescriptionListTerm>Demo Name</DescriptionListTerm>
-                    <DescriptionListDescription>{currentInstance.spec.demoName}</DescriptionListDescription>
+                    <DescriptionListDescription>{currentInstance.spec?.demoName || currentInstance.spec?.demoId || 'Unknown'}</DescriptionListDescription>
                   </DescriptionListGroup>
                   <DescriptionListGroup>
                     <DescriptionListTerm>Status</DescriptionListTerm>
                     <DescriptionListDescription>
-                      <Badge isRead={false} color={stateColors[currentInstance.status.state] || 'default'}>
-                        {currentInstance.status.state}
+                      <Badge isRead={false} color={stateColors[currentInstance.status?.state || 'pending'] || 'default'}>
+                        {currentInstance.status?.state || 'pending'}
                       </Badge>
                     </DescriptionListDescription>
                   </DescriptionListGroup>
@@ -84,7 +84,7 @@ export const InstanceDetailModal: React.FC<InstanceDetailModalProps> = ({ instan
                       {new Date(currentInstance.spec.createdAt).toLocaleString()}
                     </DescriptionListDescription>
                   </DescriptionListGroup>
-                  {currentInstance.status.startedAt && (
+                  {currentInstance.status?.startedAt && (
                     <DescriptionListGroup>
                       <DescriptionListTerm>Started</DescriptionListTerm>
                       <DescriptionListDescription>
@@ -92,7 +92,7 @@ export const InstanceDetailModal: React.FC<InstanceDetailModalProps> = ({ instan
                       </DescriptionListDescription>
                     </DescriptionListGroup>
                   )}
-                  {currentInstance.status.completedAt && (
+                  {currentInstance.status?.completedAt && (
                     <DescriptionListGroup>
                       <DescriptionListTerm>Completed</DescriptionListTerm>
                       <DescriptionListDescription>
@@ -110,13 +110,13 @@ export const InstanceDetailModal: React.FC<InstanceDetailModalProps> = ({ instan
                     <DescriptionListTerm>Path</DescriptionListTerm>
                     <DescriptionListDescription>{currentInstance.spec.playbook_path}</DescriptionListDescription>
                   </DescriptionListGroup>
-                  {currentInstance.status.message && (
+                  {currentInstance.status?.message && (
                     <DescriptionListGroup>
                       <DescriptionListTerm>Message</DescriptionListTerm>
                       <DescriptionListDescription>{currentInstance.status.message}</DescriptionListDescription>
                     </DescriptionListGroup>
                   )}
-                  {currentInstance.status.error && (
+                  {currentInstance.status?.error && (
                     <DescriptionListGroup>
                       <DescriptionListTerm>Error</DescriptionListTerm>
                       <DescriptionListDescription>
@@ -135,7 +135,7 @@ export const InstanceDetailModal: React.FC<InstanceDetailModalProps> = ({ instan
                     </DescriptionListDescription>
                   </DescriptionListGroup>
                 </DescriptionList>
-        {currentInstance.status.summary && currentInstance.status.summary.collected_info && currentInstance.status.summary.collected_info.length > 0 && (
+        {currentInstance.status?.summary && currentInstance.status.summary.collected_info && currentInstance.status.summary.collected_info.length > 0 && (
           <>
             <Divider style={{ marginTop: '1.5rem', marginBottom: '1.5rem' }} />
             <Title headingLevel="h3" size="md" style={{ marginBottom: '1rem' }}>
@@ -158,7 +158,7 @@ export const InstanceDetailModal: React.FC<InstanceDetailModalProps> = ({ instan
         <Title headingLevel="h3" size="md" style={{ marginBottom: '1rem' }}>
           Execution Output
         </Title>
-        {currentInstance.status.output ? (
+        {currentInstance.status?.output ? (
           <pre style={{
             fontSize: '0.875rem',
             padding: '1rem',

@@ -27,7 +27,7 @@ export interface CatalogConfig {
 
 export interface InstanceSpec {
   demoId: string;
-  demoName: string;
+  demoName?: string;
   demoType: 'playbook' | 'role';
   demoPath: string;
   playbook_path: string;
@@ -55,6 +55,6 @@ export interface InstanceStatus {
 export interface Instance {
   id: string;
   spec: InstanceSpec;
-  status: InstanceStatus;
+  status: InstanceStatus | null;
 }
 

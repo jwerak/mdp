@@ -1,5 +1,5 @@
 ---
-# Default variables for hello-world role
+# Default variables for test role
 greeting: "Hello, World!"
 greeting_label: "Greeting Message"
 greeting_description: "The greeting message to display"
