@@ -12,10 +12,6 @@
     collected_info: []
 
   tasks:
-    - name: sleep for 10 minutes
-      ansible.builtin.pause:
-        minutes: 10
-
     - name: Validate required variables are defined
       ansible.builtin.assert:
         that:

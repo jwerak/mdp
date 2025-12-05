@@ -227,14 +227,29 @@ export async function getAllInstances(): Promise<Instance[]> {
 
 export async function deleteInstance(instanceId: string): Promise<void> {
   const instancePath = `${INSTANCES_PATH}/${instanceId}`;
+  const unitName = `cockpit-demo-${instanceId}`;
 
   return new Promise((resolve, reject) => {
     const cockpit = getCockpit();
-    cockpit.spawn(['rm', '-rf', instancePath], { err: 'out' })
-      .then(() => resolve())
+
+    // First, try to stop the systemd unit if it's running
+    // Using systemctl --user stop with --no-block to avoid hanging if unit doesn't exist
+    cockpit.spawn(['systemctl', '--user', 'stop', unitName], { err: 'out' })
+      .then(() => {
+        console.log(`Stopped systemd unit ${unitName}`);
+      })
       .catch((error: any) => {
-        console.error('Failed to delete instance:', error);
-        reject(new Error(`Failed to delete instance: ${error.message}`));
+        // Unit may not exist or already stopped, that's OK, continue with deletion
+        console.log(`Could not stop systemd unit ${unitName} (may not exist):`, error);
+      })
+      .finally(() => {
+        // Now delete the instance directory
+        cockpit.spawn(['rm', '-rf', instancePath], { err: 'out' })
+          .then(() => resolve())
+          .catch((error: any) => {
+            console.error('Failed to delete instance:', error);
+            reject(new Error(`Failed to delete instance: ${error.message}`));
+          });
       });
   });
 }
