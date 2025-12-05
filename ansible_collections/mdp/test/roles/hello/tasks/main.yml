@@ -32,26 +32,12 @@
   loop: "{{ range(1, count | int + 1) | list }}"
   when: count | int > 0
 
-- name: Set transformed variables for status
+- name: Set demo execution results for status reporting
   ansible.builtin.set_fact:
-    status_variables:
+    demo_execution_results:
       transformed_greeting: "{{ transformed_greeting }}"
       original_greeting: "{{ greeting }}"
       language_used: "{{ language }}"
       uppercase_applied: "{{ uppercase }}"
       message_count: "{{ count }}"
       timestamp: "{{ ansible_date_time.iso8601 }}"
-
-- name: Display final status summary
-  ansible.builtin.debug:
-    msg: |
-      ========================================
-      Hello World Demo - Execution Summary
-      ========================================
-      Transformed Greeting: {{ transformed_greeting }}
-      Original Greeting: {{ greeting }}
-      Language: {{ language }}
-      Uppercase Applied: {{ uppercase }}
-      Count: {{ count }}
-      Timestamp: {{ ansible_date_time.iso8601 }}
-      ========================================

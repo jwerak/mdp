@@ -179,6 +179,13 @@ This ensures ansible-navigator can access collections from both the plugin-speci
 }
 ```
 
+**Ansible Naming Conventions:**
+- Follow [Ansible good practices](https://redhat-cop.github.io/automation-good-practices/) for naming variables and tasks.
+- Use descriptive variable names that clearly indicate their purpose (e.g., `demo_execution_results` instead of `status_variables`).
+- Use snake_case for all variable names.
+- Task names should be descriptive and start with an action verb.
+- Variables containing demo execution results should be named `demo_execution_results` for consistency.
+
 **Constraints:**
 - Use `cockpit.spawn` to execute `ansible-galaxy collection install` command in the execution environment when installing collections.
 - Support loading collections from locally installed locations without requiring installation.

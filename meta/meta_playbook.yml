@@ -52,14 +52,6 @@
         name: "{{ demo_path }}"
       when: demo_type == 'role'
 
-    - name: Collect variable information for summary
-      ansible.builtin.set_fact:
-        collected_info: "{{ collected_info + [{
-          'name': item.name,
-          'description': item.description | default(''),
-          'value': demo_vars[item.name] | default('N/A') | string }] }}"
-      loop: "{{ variable_definitions }}"
-
     - name: Display summary and save status
       ansible.builtin.debug:
         msg: "{{ summary_msg.split('\n') }}"
@@ -83,6 +75,6 @@
           'message': 'Execution completed successfully',
           'completedAt': ansible_date_time.iso8601,
           'summary': {
-          'collected_info': collected_info
+          'demo_execution_results': demo_execution_results | default({})
           } } | to_json }}"
         dest: "{{ status_file }}"
