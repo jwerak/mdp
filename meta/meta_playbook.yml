@@ -52,28 +52,10 @@
         name: "{{ demo_path }}"
       when: demo_type == 'role'
 
-    - name: Display summary and save status
-      ansible.builtin.debug:
-        msg: "{{ summary_msg.split('\n') }}"
-      vars:
-        summary_msg: |
-          ========================================
-          Playbook Execution Summary
-          ========================================
-          {% for item in collected_info %}
-          {{ item.description }}
-            Name:  {{ item.name }}
-            Value: {{ item.value }}
-          {% endfor %}
-          ========================================
-      register: summary_output
-
-    - name: Write status to file
+    - name: Write execution results to status file
       ansible.builtin.copy:
         content: "{{ {
-          'state': 'completed',
-          'message': 'Execution completed successfully',
-          'completedAt': ansible_date_time.iso8601,
+          'message': 'Demo execution finished',
           'summary': {
           'demo_execution_results': demo_execution_results | default({})
           } } | to_json }}"

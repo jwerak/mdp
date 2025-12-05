@@ -470,6 +470,7 @@ export async function executeInstance(
 
       if (exitCode === 0) {
         finalStatus.state = 'completed';
+        finalStatus.error = undefined;  // Clear any previous error on success
         if (!finalStatus.message) {
           finalStatus.message = 'Playbook execution completed successfully';
         }

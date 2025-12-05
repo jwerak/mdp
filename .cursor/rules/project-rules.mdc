@@ -53,7 +53,7 @@ The plugin checks these locations in addition to the plugin-specific directory w
       - `collectionName`: Optional. Automatically extracted during catalog sync and cached in config.json. Can be read from MANIFEST.json (installed collections) or galaxy.yml (source collections). Should not be manually set.
       - `useLocalCollection`: If true, load collection from locally installed locations instead of installing. Defaults to false.
     - `InstanceSpec`: Includes demoType, demoPath, and variable_definitions array
-    - `InstanceStatus`: Includes optional summary field with collected_info array
+    - `InstanceStatus`: Includes optional summary field with demo_execution_results object
 
 2.  **Catalog Service (`src/lib/catalog.ts`):**
     - `syncCatalog(config)`:
@@ -95,7 +95,7 @@ The plugin checks these locations in addition to the plugin-specific directory w
       - Calls meta playbook (`/var/lib/cockpit-plugin-demos/meta/meta_playbook.yml`) instead of direct playbook.
       - Passes `instance_id`, `demo_type`, `demo_path`, `demo_vars`, and `variable_definitions` as extra-vars.
       - Meta playbook validates variables and executes the target playbook.
-      - Parses status.json written by meta playbook (includes summary with collected_info).
+      - Parses status.json written by meta playbook (includes summary with demo_execution_results).
       - Triggers `ansible-navigator` via `systemd-run` using the configured execution environment.
       - Uses `--working-directory` parameter of systemd-run to set BASE_PATH (`/var/lib/cockpit-plugin-demos`) as the working directory, so ansible-navigator automatically mounts it into the execution environment.
       - Uses relative playbook path (`meta/meta_playbook.yml`) since execution happens from BASE_PATH.
@@ -116,7 +116,7 @@ The plugin checks these locations in addition to the plugin-specific directory w
       - Uses `required` field for validation instead of checking default value.
       - Use `react-hook-form` or controlled state to capture values.
     - **Instance Detail Modal:**
-      - Shows execution summary with collected_info from status.json.
+      - Shows execution summary with demo_execution_results from status.json.
       - Displays demo type badge.
     - **Instance List:** Polling `status.json` for deployment updates.
 
@@ -147,8 +147,10 @@ The meta playbook (`/var/lib/cockpit-plugin-demos/meta/meta_playbook.yml`) valid
 - Validates required variables are defined
 - Validates variable types (text, number, boolean, select)
 - Includes playbook based on demo_type
-- Collects variable information for summary
-- Writes status.json with summary including collected_info
+- Writes partial status.json with only execution results (message, summary)
+- IMPORTANT: Meta playbook should NOT write the 'state' or 'completedAt' fields
+- Final state determination is handled by TypeScript code based on systemd-run exit code
+- This ensures accurate failure detection even if the playbook completes but the container fails
 
 **Ansible Configuration:**
 
@@ -168,16 +170,15 @@ This ensures ansible-navigator can access collections from both the plugin-speci
   "error": "<error-message-if-failed>",
   "output": "<ansible-output>",
   "summary": {
-    "collected_info": [
-      {
-        "description": "<description>",
-        "name": "<variable-name>",
-        "value": "<variable-value>"
-      }
-    ]
+    "demo_execution_results": {
+      "<key>": "<value>",
+      "...": "..."
+    }
   }
 }
 ```
+
+Note: The meta playbook writes only `message` and `summary` fields. The TypeScript code sets `state`, `completedAt`, `error`, and `output` based on the actual execution result.
 
 **Ansible Naming Conventions:**
 - Follow [Ansible good practices](https://redhat-cop.github.io/automation-good-practices/) for naming variables and tasks.

@@ -40,4 +40,4 @@
       language_used: "{{ language }}"
       uppercase_applied: "{{ uppercase }}"
       message_count: "{{ count }}"
-      timestamp: "{{ ansible_date_time.iso8601 }}"
+      timestamp: "{{ now(utc=true).isoformat() }}"
