@@ -6,7 +6,7 @@
   (window as { __webpack_public_path__?: string }).__webpack_public_path__ = publicPath;
 })();
 
-import '@patternfly/react-core/dist/styles/base.css';
+import '@patternfly/patternfly/patternfly.css';
 import "cockpit-dark-theme";
 import React from 'react';
 import ReactDOM from 'react-dom/client';

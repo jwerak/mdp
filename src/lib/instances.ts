@@ -387,7 +387,8 @@ export async function executeInstance(
     `--extra-vars '${JSON.stringify(extraVars)}' ` +
     `--mode stdout ` +
     `--pull-policy missing ` +
-    `--pae false ` +
+    `--pae true ` +
+    `--pas "${artifactPath}/{playbook_name}-artifact-{time_stamp}.json" ` +
     `--lf "${artifactPath}/ansible-navigator.log"`
   ];
 
