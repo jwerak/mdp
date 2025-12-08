@@ -8,15 +8,14 @@ import {
   PageSection,
   PageSectionTypes,
   Spinner,
-  Split,
-  SplitItem,
   Title
 } from '@patternfly/react-core';
 import { CogIcon } from '@patternfly/react-icons';
 import React, { Component, ErrorInfo, ReactNode, Suspense, lazy, useState } from 'react';
 
-const DemoList = lazy(() => import('./components/DemoList').then(module => ({ default: module.DemoList })));
+const CatalogGrid = lazy(() => import('./components/CatalogGrid').then(module => ({ default: module.CatalogGrid })));
 const InstanceList = lazy(() => import('./components/InstanceList').then(module => ({ default: module.InstanceList })));
+const InstanceDetail = lazy(() => import('./components/InstanceDetail').then(module => ({ default: module.InstanceDetail })));
 const SettingsModal = lazy(() => import('./components/SettingsModal').then(module => ({ default: module.SettingsModal })));
 
 const LoadingFallback: React.FC = () => (
@@ -61,10 +60,28 @@ class ErrorBoundary extends Component<{ children: ReactNode }, ErrorBoundaryStat
 
 export const App: React.FC = () => {
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [selectedInstanceId, setSelectedInstanceId] = useState<string | null>(null);
 
+  // If an instance is selected, show detail view
+  if (selectedInstanceId) {
+    return (
+      <Page className="pf-m-no-sidebar">
+        <ErrorBoundary>
+          <Suspense fallback={<LoadingFallback />}>
+            <InstanceDetail
+              instanceId={selectedInstanceId}
+              onBack={() => setSelectedInstanceId(null)}
+            />
+          </Suspense>
+        </ErrorBoundary>
+      </Page>
+    );
+  }
+
+  // Otherwise show main view with catalog and instance list
   return (
     <Page className="pf-m-no-sidebar">
-      <PageSection type={PageSectionTypes.default} variant="secondary">
+      <PageSection type={PageSectionTypes.default} variant="default" hasBodyWrapper={true}>
         <Flex justifyContent={{ default: 'justifyContentSpaceBetween' }} alignItems={{ default: 'alignItemsCenter' }}>
           <FlexItem>
             <Title headingLevel="h1" size="2xl">Demo Deployments</Title>
@@ -80,26 +97,30 @@ export const App: React.FC = () => {
           </FlexItem>
         </Flex>
       </PageSection>
-      <PageSection type={PageSectionTypes.default}>
+      <PageSection hasBodyWrapper={true}>
         <ErrorBoundary>
           <Suspense fallback={<LoadingFallback />}>
-            <Split hasGutter>
-              <SplitItem isFilled={false} style={{ width: '300px', minWidth: '300px' }}>
-                <DemoList onConfigureCatalog={() => setSettingsOpen(true)} />
-              </SplitItem>
-              <SplitItem isFilled>
-                <InstanceList />
-              </SplitItem>
-            </Split>
-            {settingsOpen && (
-              <SettingsModal
-                isOpen={settingsOpen}
-                onClose={() => setSettingsOpen(false)}
-              />
-            )}
+            <CatalogGrid onConfigureCatalog={() => setSettingsOpen(true)} />
           </Suspense>
         </ErrorBoundary>
       </PageSection>
+      <PageSection hasBodyWrapper={true}>
+        <ErrorBoundary>
+          <Suspense fallback={<LoadingFallback />}>
+            <InstanceList onViewInstance={setSelectedInstanceId} />
+          </Suspense>
+        </ErrorBoundary>
+      </PageSection>
+      {settingsOpen && (
+        <ErrorBoundary>
+          <Suspense fallback={<LoadingFallback />}>
+            <SettingsModal
+              isOpen={settingsOpen}
+              onClose={() => setSettingsOpen(false)}
+            />
+          </Suspense>
+        </ErrorBoundary>
+      )}
     </Page>
   );
 };

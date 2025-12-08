@@ -102,23 +102,79 @@ The plugin checks these locations in addition to the plugin-specific directory w
       - Uses `ansible.cfg` in the meta directory which configures `collections_paths` to include `/var/lib/cockpit-plugin-demos/collections` along with standard paths.
       - Captures and streams command output to the web UI.
 
-4.  **UI Components (PatternFly):**
-    - **Settings:** Form to configure Collection Source (Git URL or Galaxy format), Execution Environment, and option to use locally installed collection.
+4.  **UI Components (PatternFly v6):**
+    - **Page Layout:**
+      - Use `PageSection` components with proper variants (`pf-m-secondary` for header sections).
+      - Header section with `Flex` layout (`pf-m-align-items-center pf-m-justify-content-space-between`) containing:
+        - `Title` component with `size="2xl"` for main heading.
+        - Secondary button for settings/configuration with icon (`<CogIcon />` from `@patternfly/react-icons`).
+      - Use `hasBodyWrapper={true}` on `PageSection` for proper content padding.
+
+    - **Expandable Sections:**
+      - Wrap each major content section in `ExpandableSection` component with `displaySize="lg"`.
+      - Section titles should include counts (e.g., "Available Demos (1)", "Running Services (1)").
+      - Expandable sections should be expanded by default (`isExpanded={true}`).
+
+    - **Catalog Grid (Available Demos):**
+      - Use `Gallery` component with gutter (`hasGutter`) for responsive card layout.
+      - Configure `minWidths` for responsive breakpoints: `{ default: '100%', md: '300px', lg: '300px' }`.
+      - Each demo as a clickable `Card` with `isClickable` style.
+      - **Card Header:** `Flex` layout with:
+        - Icon wrapped in `Icon` component with `size="xl"` (e.g., `<CubeIcon />` for demos).
+        - `Content` component with `<h2>` for demo name.
+        - `Badge` with `isRead` variant for demo type (e.g., "role", "playbook").
+      - **Card Body:** Demo description text.
+      - **Card Footer:** `HelperText` component with `HelperTextItem` showing:
+        - Path information in small font (`font-size: 0.875rem`).
+        - Parameter count in small font.
+        - Use `<strong>` tags for labels.
+
+    - **Instance List (Running Services):**
+      - Use composable `Table` from `@patternfly/react-table` with `variant="compact"` and `gridBreakPoint="grid-md"`.
+      - **Columns:** Checkbox | Name | Status | Description | Actions.
+      - **Select-all Checkbox:** In `Thead`, first `Th` with standalone `Checkbox` component.
+      - **Row Checkboxes:** In `Tbody`, first `Td` of each row with standalone `Checkbox`.
+      - **Clickable Rows:** Table rows are clickable (`isClickable` prop) and navigate to instance detail page when clicked.
+        - Checkbox and Actions columns should `stopPropagation` to prevent navigation when interacting with them.
+      - **Name Column:** Two-line display:
+        - First line: Demo name in `<strong>` tag.
+        - Second line: Instance ID in smaller font with muted color (`font-size: 0.875rem; color: var(--pf-v6-global--Color--200)`).
+      - **Status Column:** `Badge` component with `isRead={false}` for active states (pending, running).
+      - **Description Column:** Text with max-width constraint (`max-width: 400px`).
+      - **Actions Column:** `MenuToggle` with `variant="plain"` containing `EllipsisVIcon` for kebab menu.
+
+    - **Settings Modal:**
+      - Form to configure Collection Source (Git URL or Galaxy format), Execution Environment, and option to use locally installed collection.
       - Namespace and Collection Name fields should NOT be displayed in the form.
       - These values are automatically extracted during catalog sync and cached in config.json.
       - The plugin checks config.json first for cached values, then falls back to reading MANIFEST.json or galaxy.yml from the collection if needed.
       - If namespace/collectionName are needed before installation (e.g., for Galaxy format `namespace.collection`), they can be parsed from the collectionSource field.
-    - **Catalog Grid:** Cards displaying available demos from `demos.yaml` with playbook type badges and descriptions.
+
     - **Dynamic Launch Modal:**
       - Takes a `DemoDefinition`.
       - **Dynamically renders inputs** based on `parameters` array.
-      - Displays parameter descriptions as helper text.
+      - Displays parameter descriptions as helper text using `HelperText` component.
       - Uses `required` field for validation instead of checking default value.
       - Use `react-hook-form` or controlled state to capture values.
-    - **Instance Detail Modal:**
+
+    - **Instance Detail Page:**
+      - Displays full instance details on a separate view (not a modal/drawer).
+      - **Breadcrumb Navigation:** Use `Breadcrumb` component at the top showing "Instances > {instance-name}".
+      - **Page Structure:**
+        - `PageSection` with breadcrumb navigation.
+        - `PageSection` with instance status information (state, timestamps, demo type badge).
+        - `ExpandableSection` for logs output with `displaySize="lg"`.
+        - Pre-formatted logs display in a monospace font with dark background.
+      - **Navigation:** Clicking on table rows navigates to detail page, breadcrumb "Instances" link returns to main view.
       - Shows execution summary with demo_execution_results from status.json.
-      - Displays demo type badge.
-    - **Instance List:** Polling `status.json` for deployment updates.
+      - Displays demo type badge using `Badge` component.
+
+    - **General Styling:**
+      - Use PatternFly v6 class naming (`pf-v6-c-*` prefix).
+      - Wrap icons in `Icon` component from `@patternfly/react-core` for consistent sizing.
+      - Use utility classes for spacing (`pf-v6-u-mb-lg`, etc.) and layout (`pf-v6-l-flex`, `pf-v6-l-gallery`).
+      - Apply proper ARIA labels and OUIA (Open UI Automation) attributes for accessibility.
+      - Use PatternFly color variables for muted text: `var(--pf-v6-global--Color--200)`.
 
 **demos.yaml Structure:**
 

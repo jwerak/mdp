@@ -52,6 +52,30 @@ Guide for using [patternfly-react-seed](mdc:https:/github.com/patternfly/pattern
 *   **Component Layout Order:** A common page structure is `React.Fragment` containing:
     1.  `PageSection` for the main `Title`.
     2.  `PageSection` for primary content like `Toolbar` and `Table`.
+*   **Card Styling:**
+    *   Default `Card` components have gray background for elevation/depth.
+    *   `isPlain` prop removes all styling (background + borders) for flush appearance.
+    *   Add custom borders with inline styles: `style={{ border: '1px solid var(--pf-v6-global--BorderColor--100)' }}`.
+    *   Use `isClickable` prop for interactive cards that navigate or trigger actions.
+*   **Table Row Interactions:**
+    *   Make rows clickable with `isClickable` prop on `<Tr>`.
+    *   Use `onRowClick` handler for navigation or detail views.
+    *   Apply `onClick={(e) => e.stopPropagation()}` to interactive cells (checkboxes, dropdowns) to prevent row click events.
+    *   Provides visual hover feedback indicating clickability.
+*   **Breadcrumb Navigation:**
+    *   Use `Breadcrumb` and `BreadcrumbItem` components for hierarchical navigation.
+    *   BreadcrumbItem with `to="#"` and `onClick` handler for back navigation.
+    *   Set `isActive` prop on current page item.
+    *   Place in `PageSection` with `variant="secondary"` for proper visual separation.
+*   **ExpandableSection for Logs/Output:**
+    *   Use `ExpandableSection` with `displaySize="lg"` for log displays.
+    *   Style logs with monospace font and dark background: `backgroundColor: '#1e1e1e'`, `color: '#d4d4d4'`.
+    *   Use `<pre>` tag with proper overflow handling: `maxHeight`, `overflow: 'auto'`, `whiteSpace: 'pre-wrap'`.
+    *   Control initial state with `isExpanded` prop.
+*   **CSS Variables:**
+    *   Use PatternFly CSS variables for theme consistency: `--pf-v6-global--BackgroundColor--100`, `--pf-v6-global--BorderColor--100`, `--pf-v6-global--Color--200` (muted text).
+    *   CSS variables automatically adapt to light/dark theme changes.
+    *   Override with inline styles when needed: `style={{ backgroundColor: 'transparent' }}`.
 *   **Documentation & Examples:** PatternFly component APIs vary by version. **Crucial: Always consult the official PatternFly documentation for your project's specific package versions or relevant local documentation (like `patternfly-react-component-groups.txt`).** Providing the AI with working code snippets or links to *versioned* docs is highly effective.
 
 ## PatternFly Charts (`@patternfly/react-charts`)
