@@ -483,7 +483,30 @@ export async function executeInstance(
         console.warn('Could not read status from meta playbook:', error);
       }
 
-      if (exitCode === 0) {
+      // Check ansible-navigator artifact for actual playbook status
+      // The process exit code may not accurately reflect playbook success
+      // (e.g., systemd-run may return non-zero for other reasons)
+      let artifactStatus: string | null = null;
+      try {
+        const artifactFiles = await cockpit.spawn(['find', artifactPath, '-name', '*-artifact-*.json', '-type', 'f', '-printf', '%T@ %p\\n']);
+        const latestArtifact = artifactFiles.trim().split('\n')
+          .sort((a: string, b: string) => parseFloat(b.split(' ')[0]) - parseFloat(a.split(' ')[0]))[0]
+          ?.split(' ')[1];
+
+        if (latestArtifact) {
+          const artifactContent = await cockpit.file(latestArtifact).read();
+          const artifact = JSON.parse(artifactContent);
+          artifactStatus = artifact.status;
+          console.log('Ansible-navigator artifact status:', artifactStatus);
+        }
+      } catch (error: any) {
+        console.warn('Could not read ansible-navigator artifact:', error);
+      }
+
+      // Determine success based on artifact status if available, otherwise use exit code
+      const isSuccess = artifactStatus ? (artifactStatus === 'successful') : (exitCode === 0);
+
+      if (isSuccess) {
         finalStatus.state = 'completed';
         finalStatus.error = undefined;  // Clear any previous error on success
         if (!finalStatus.message) {
@@ -492,13 +515,14 @@ export async function executeInstance(
       } else {
         finalStatus.state = 'failed';
         if (!finalStatus.error) {
-          finalStatus.error = `Playbook execution failed with exit code ${exitCode}`;
+          const failureReason = artifactStatus ? `playbook status: ${artifactStatus}` : `exit code ${exitCode}`;
+          finalStatus.error = `Playbook execution failed with ${failureReason}`;
         }
       }
 
       updateStatus(finalStatus)
         .then(() => {
-          if (exitCode === 0) {
+          if (isSuccess) {
             resolve();
           } else {
             reject(new Error(finalStatus.error || 'Execution failed'));
@@ -539,5 +563,53 @@ export async function executeInstance(
       reject(new Error(errorMsg));
     });
   });
+}
+
+export interface AnsibleTask {
+  task: string;
+  host: string;
+  duration: number;
+  res?: any;
+  start: string;
+  end: string;
+  task_action: string;
+  __result: string;
+  __changed: boolean;
+  __number: number;
+}
+
+export interface AnsiblePlay {
+  name: string;
+  tasks: AnsibleTask[];
+}
+
+export interface AnsibleArtifact {
+  plays: AnsiblePlay[];
+  status: string;
+  status_color: number;
+}
+
+export async function getInstanceArtifact(instanceId: string): Promise<AnsibleArtifact | null> {
+  const cockpit = getCockpit();
+  const artifactPath = `${INSTANCES_PATH}/${instanceId}/artifacts`;
+
+  try {
+    // Find the most recent artifact file
+    const artifactFiles = await cockpit.spawn(['find', artifactPath, '-name', '*-artifact-*.json', '-type', 'f', '-printf', '%T@ %p\\n']);
+    const latestArtifact = artifactFiles.trim().split('\n')
+      .sort((a: string, b: string) => parseFloat(b.split(' ')[0]) - parseFloat(a.split(' ')[0]))[0]
+      ?.split(' ')[1];
+
+    if (!latestArtifact) {
+      return null;
+    }
+
+    const artifactContent = await cockpit.file(latestArtifact).read();
+    const artifact: AnsibleArtifact = JSON.parse(artifactContent);
+    return artifact;
+  } catch (error: any) {
+    console.error('Failed to read ansible-navigator artifact:', error);
+    return null;
+  }
 }
 
