@@ -1,21 +1,19 @@
 import {
-    Badge,
-    Breadcrumb,
-    BreadcrumbItem,
-    Button,
-    DescriptionList,
-    DescriptionListDescription,
-    DescriptionListGroup,
-    DescriptionListTerm,
-    Divider,
-    ExpandableSection,
-    PageSection,
-    Title,
-    List,
-    ListItem
+  Badge,
+  Breadcrumb,
+  BreadcrumbItem,
+  Button,
+  DescriptionList,
+  DescriptionListDescription,
+  DescriptionListGroup,
+  DescriptionListTerm,
+  Divider,
+  ExpandableSection,
+  PageSection,
+  Title
 } from '@patternfly/react-core';
 import React, { useEffect, useState } from 'react';
-import { getInstance, getInstanceArtifact, AnsibleArtifact, AnsibleTask } from '../lib/instances';
+import { AnsibleArtifact, getInstance, getInstanceArtifact, getInstanceNavigatorLog } from '../lib/instances';
 import { Instance } from '../lib/types';
 
 interface InstanceDetailProps {
@@ -33,7 +31,7 @@ const stateColors: Record<string, 'default' | 'success' | 'warning' | 'danger'> 
 // Simple JSON syntax highlighter
 const highlightJSON = (json: string): string => {
   return json
-    .replace(/("(\\u[a-zA-Z0-9]{4}|\\[^u]|[^\\"])*"(\s*:)?|\b(true|false|null)\b|-?\d+(?:\.\d*)?(?:[eE][+\-]?\d+)?)/g, (match) => {
+    .replace(/("(\\u[a-zA-Z0-9]{4}|\\[^u]|[^\\"])*"(\s*:)?|\b(true|false|null)\b|-?\d+(?:\.\d*)?(?:[eE][+-]?\d+)?)/g, (match) => {
       let cls = 'json-number';
       if (/^"/.test(match)) {
         if (/:$/.test(match)) {
@@ -53,9 +51,11 @@ const highlightJSON = (json: string): string => {
 export const InstanceDetail: React.FC<InstanceDetailProps> = ({ instanceId, onBack }) => {
   const [instance, setInstance] = useState<Instance | null>(null);
   const [loading, setLoading] = useState(true);
-  const [logsExpanded, setLogsExpanded] = useState(true);
+  const [logsExpanded, setLogsExpanded] = useState(false);
   const [artifact, setArtifact] = useState<AnsibleArtifact | null>(null);
+  const [navigatorLog, setNavigatorLog] = useState<string | null>(null);
   const [artifactExpanded, setArtifactExpanded] = useState(false);
+  const [navigatorLogExpanded, setNavigatorLogExpanded] = useState(false);
   const [expandedTasks, setExpandedTasks] = useState<Set<string>>(new Set());
 
   useEffect(() => {
@@ -68,6 +68,8 @@ export const InstanceDetail: React.FC<InstanceDetailProps> = ({ instanceId, onBa
         if (inst.status?.state === 'completed' || inst.status?.state === 'failed') {
           const art = await getInstanceArtifact(instanceId);
           setArtifact(art);
+          const log = await getInstanceNavigatorLog(instanceId);
+          setNavigatorLog(log);
         }
       } catch (err) {
         console.error('Failed to load instance:', err);
@@ -88,6 +90,8 @@ export const InstanceDetail: React.FC<InstanceDetailProps> = ({ instanceId, onBa
         if (updated.status?.state === 'completed' || updated.status?.state === 'failed') {
           const art = await getInstanceArtifact(instanceId);
           setArtifact(art);
+          const log = await getInstanceNavigatorLog(instanceId);
+          setNavigatorLog(log);
         }
       } catch (err) {
         console.error('Failed to refresh instance:', err);
@@ -240,35 +244,36 @@ export const InstanceDetail: React.FC<InstanceDetailProps> = ({ instanceId, onBa
           </>
         )}
 
-        <Divider style={{ marginTop: '1.5rem', marginBottom: '1.5rem' }} />
-
-        <ExpandableSection
-          toggleText="Execution Logs"
-          isExpanded={logsExpanded}
-          onToggle={() => setLogsExpanded(!logsExpanded)}
-          displaySize="lg"
-        >
-          {instance.status?.output ? (
-            <pre style={{
-              fontSize: '0.875rem',
-              fontFamily: 'monospace',
-              padding: '1rem',
-              backgroundColor: '#1e1e1e',
-              color: '#d4d4d4',
-              borderRadius: '4px',
-              maxHeight: '500px',
-              overflow: 'auto',
-              whiteSpace: 'pre-wrap',
-              wordBreak: 'break-word'
-            }}>
-              {instance.status.output}
-            </pre>
-          ) : (
-            <div style={{ padding: '1rem', color: 'var(--pf-v6-global--Color--200)' }}>
-              No execution output available yet. Execute the instance to see output.
-            </div>
-          )}
-        </ExpandableSection>
+        {instance.status?.summary?.demo_execution_results && Object.keys(instance.status.summary.demo_execution_results).length > 0 && (
+          <>
+            <Divider style={{ marginTop: '1.5rem', marginBottom: '1.5rem' }} />
+            <DescriptionList>
+              {Object.entries(instance.status.summary.demo_execution_results).map(([key, value]) => (
+                <DescriptionListGroup key={key}>
+                  <DescriptionListTerm>{key}</DescriptionListTerm>
+                  <DescriptionListDescription>
+                    {typeof value === 'object' ? (
+                      <pre style={{
+                        fontSize: '0.875rem',
+                        fontFamily: 'monospace',
+                        padding: '0.5rem',
+                        backgroundColor: 'var(--pf-v6-global--BackgroundColor--200)',
+                        borderRadius: '4px',
+                        margin: 0,
+                        whiteSpace: 'pre-wrap',
+                        wordBreak: 'break-word'
+                      }}>
+                        {JSON.stringify(value, null, 2)}
+                      </pre>
+                    ) : (
+                      String(value)
+                    )}
+                  </DescriptionListDescription>
+                </DescriptionListGroup>
+              ))}
+            </DescriptionList>
+          </>
+        )}
 
         {artifact && artifact.plays && artifact.plays.length > 0 && (
           <>
@@ -410,8 +415,65 @@ export const InstanceDetail: React.FC<InstanceDetailProps> = ({ instanceId, onBa
                 ))}
               </div>
             </ExpandableSection>
+
+            {navigatorLog && (
+              <>
+                <Divider style={{ marginTop: '1.5rem', marginBottom: '1.5rem' }} />
+                <ExpandableSection
+                  toggleText="Ansible Navigator Log"
+                  isExpanded={navigatorLogExpanded}
+                  onToggle={() => setNavigatorLogExpanded(!navigatorLogExpanded)}
+                  displaySize="lg"
+                >
+                  <pre style={{
+                    fontSize: '0.875rem',
+                    fontFamily: 'monospace',
+                    padding: '1rem',
+                    backgroundColor: '#1e1e1e',
+                    color: '#d4d4d4',
+                    borderRadius: '4px',
+                    maxHeight: '500px',
+                    overflow: 'auto',
+                    whiteSpace: 'pre-wrap',
+                    wordBreak: 'break-word'
+                  }}>
+                    {navigatorLog}
+                  </pre>
+                </ExpandableSection>
+              </>
+            )}
           </>
         )}
+
+        <Divider style={{ marginTop: '1.5rem', marginBottom: '1.5rem' }} />
+
+        <ExpandableSection
+          toggleText="Execution Logs"
+          isExpanded={logsExpanded}
+          onToggle={() => setLogsExpanded(!logsExpanded)}
+          displaySize="lg"
+        >
+          {instance.status?.output ? (
+            <pre style={{
+              fontSize: '0.875rem',
+              fontFamily: 'monospace',
+              padding: '1rem',
+              backgroundColor: '#1e1e1e',
+              color: '#d4d4d4',
+              borderRadius: '4px',
+              maxHeight: '500px',
+              overflow: 'auto',
+              whiteSpace: 'pre-wrap',
+              wordBreak: 'break-word'
+            }}>
+              {instance.status.output}
+            </pre>
+          ) : (
+            <div style={{ padding: '1rem', color: 'var(--pf-v6-global--Color--200)' }}>
+              No execution output available yet. Execute the instance to see output.
+            </div>
+          )}
+        </ExpandableSection>
 
         <div style={{ marginTop: '2rem' }}>
           <Button variant="secondary" onClick={onBack}>

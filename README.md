@@ -35,12 +35,12 @@ Cockpit plugin for deploying and managing demo deployments from Ansible Collecti
    # Should show 'cockpit-demo-ops' in the list
    ```
 
-4. **Create and set permissions for data directory:**
+4. **Create and set permissions for shared collections directory:**
    ```bash
-   # Create directories with root ownership
+   # Create shared collections directory with root ownership
    sudo mkdir -p /var/lib/cockpit-plugin-demos/collections/ansible_collections
 
-   # Set ownership and permissions
+   # Set ownership and permissions for shared collections
    sudo chown root:cockpit-demo-ops /var/lib/cockpit-plugin-demos
    sudo chmod 775 /var/lib/cockpit-plugin-demos
    sudo chown -R root:cockpit-demo-ops /var/lib/cockpit-plugin-demos/collections
@@ -55,6 +55,8 @@ Cockpit plugin for deploying and managing demo deployments from Ansible Collecti
    sudo chmod -R 775 /var/lib/cockpit-plugin-demos/collections
    sudo find /var/lib/cockpit-plugin-demos/collections -type d -exec chmod g+s {} \;
    ```
+
+   **Note:** Per-user instance data and configuration are automatically created in `~/.local/share/cockpit-plugin-demos/` when first used. No manual setup is required for per-user directories.
 
 5. **Set SELinux context for data directory:**
    ```bash
@@ -234,9 +236,9 @@ If "Demo Deployments" doesn't appear in the sidebar:
 
 ### Directory Structure
 
-The plugin maintains this structure:
+The plugin uses a hybrid storage approach with shared collections and per-user instance data:
 
-**Static application files (read-only):**
+**System-wide static files (read-only):**
 ```
 /usr/share/cockpit-plugin-demos/
 └── meta/
@@ -253,21 +255,39 @@ The plugin maintains this structure:
     └── mdp.js (and other assets)
 ```
 
-**Runtime data (variable):**
+**Shared runtime data (system-wide, shared across users):**
 ```
 /var/lib/cockpit-plugin-demos/
-├── collections/
-│   └── ansible_collections/
-│       └── <namespace>/
-│           └── <collection>/
-│               ├── galaxy.yml
-│               ├── demos.yaml
-│               └── roles/ or playbooks/
-└── instances/
+└── collections/              # Shared Ansible collections cache
+    └── ansible_collections/
+        └── <namespace>/
+            └── <collection>/
+                ├── MANIFEST.json
+                ├── galaxy.yml
+                ├── demos.yaml
+                └── roles/ or playbooks/
+```
+
+**Per-user runtime data (isolated per user):**
+```
+~/.local/share/cockpit-plugin-demos/  # Regular users
+├── config.json                      # User-specific catalog configuration
+└── instances/                       # User-specific instance data
     └── <instance-id>/
         ├── spec.json
-        └── status.json
+        ├── status.json
+        └── artifacts/               # Execution artifacts and logs
+
+/var/lib/cockpit-plugin-demos/        # Superuser (system administrator)
+├── config.json                      # System-wide catalog configuration
+└── instances/                       # System-wide instance data
+    └── <instance-id>/
+        ├── spec.json
+        ├── status.json
+        └── artifacts/
 ```
+
+**Note:** Regular users store their instances and configuration in their home directory (`~/.local/share/cockpit-plugin-demos/`), while superusers use system-wide paths (`/var/lib/cockpit-plugin-demos/`). Collections are always shared system-wide for efficiency.
 
 ### Example demos.yaml Format
 
@@ -306,7 +326,11 @@ The plugin maintains this structure:
 
 ### Notes
 
-- Plugin runs as standard user (no sudo required)
+- Plugin runs as standard user (no sudo required) or system administrator
 - Git operations use `cockpit.spawn` for security
 - Instance IDs format: `<demo-id>-<4-char-random>`
-- External EDA process watches `/var/lib/cockpit-plugin-demos/instances/` for new deployments
+- **Multi-User Support:** Each user has isolated instance storage and configuration
+  - Regular users: `~/.local/share/cockpit-plugin-demos/`
+  - Superuser: `/var/lib/cockpit-plugin-demos/`
+- Collections are shared system-wide for efficiency
+- External EDA process should watch per-user instance directories if monitoring is needed

@@ -44,11 +44,12 @@ export interface InstanceStatus {
   error?: string;
   output?: string;
   summary?: {
-    collected_info: Array<{
+    collected_info?: Array<{
       description: string;
       name: string;
       value: string;
     }>;
+    demo_execution_results?: Record<string, any>;
   };
 }
 
@@ -56,5 +57,12 @@ export interface Instance {
   id: string;
   spec: InstanceSpec;
   status: InstanceStatus | null;
+}
+
+export interface UserPaths {
+  collections: string;
+  instances: string;
+  config: string;
+  artifacts: (instanceId: string) => string;
 }
 

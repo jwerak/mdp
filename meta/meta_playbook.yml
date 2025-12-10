@@ -8,7 +8,7 @@
     demo_path: "{{ demo_path }}"
     demo_vars: "{{ demo_vars | default({}) }}"
     variable_definitions: "{{ variable_definitions | default([]) }}"
-    status_file: "/var/lib/cockpit-plugin-demos/instances/{{ instance_id }}/status.json"
+    status_file: "{{ status_file | default('/var/lib/cockpit-plugin-demos/instances/' + instance_id + '/status.json') }}"
     collected_info: []
 
   tasks:

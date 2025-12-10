@@ -1,5 +1,6 @@
 import { ensureAnsibleCfg, getPlaybookPath, getVariableDefinitions } from './catalog';
 import { loadConfig } from './config';
+import { getUserPaths, SHARED_BASE_PATH } from './paths';
 import { CatalogConfig, DemoDefinition, Instance, InstanceSpec, InstanceStatus } from './types';
 
 declare global {
@@ -15,9 +16,6 @@ function getCockpit() {
   throw new Error('Cockpit API is not available');
 }
 
-const BASE_PATH = '/var/lib/cockpit-plugin-demos';
-const INSTANCES_PATH = `${BASE_PATH}/instances`;
-
 function generateInstanceId(demoId: string): string {
   const randomStr = Math.random().toString(36).substring(2, 6).toLowerCase();
   return `${demoId}-${randomStr}`;
@@ -28,8 +26,9 @@ export async function createInstance(
   formData: Record<string, any>,
   config: CatalogConfig
 ): Promise<string> {
+  const paths = await getUserPaths();
   const instanceId = generateInstanceId(demo.id);
-  const instancePath = `${INSTANCES_PATH}/${instanceId}`;
+  const instancePath = `${paths.instances}/${instanceId}`;
   const specPath = `${instancePath}/spec.json`;
   const statusPath = `${instancePath}/status.json`;
 
@@ -54,8 +53,8 @@ export async function createInstance(
 
   return new Promise((resolve, reject) => {
     const cockpit = getCockpit();
-    // Create instance directory with cockpit-demo-ops group and 775 permissions
-    cockpit.spawn(['bash', '-c', `umask 002 && install -d -g cockpit-demo-ops -m 775 "${instancePath}"`], { err: 'out' })
+    // Create instance directory with proper permissions (umask 002 for group write)
+    cockpit.spawn(['bash', '-c', `umask 002 && install -d -m 775 "${instancePath}"`], { err: 'out' })
       .then(() => {
         return cockpit.file(specPath).replace(JSON.stringify(spec, null, 2));
       })
@@ -71,7 +70,8 @@ export async function createInstance(
 }
 
 export async function getInstance(instanceId: string): Promise<Instance> {
-  const instancePath = `${INSTANCES_PATH}/${instanceId}`;
+  const paths = await getUserPaths();
+  const instancePath = `${paths.instances}/${instanceId}`;
   const specPath = `${instancePath}/spec.json`;
   const statusPath = `${instancePath}/status.json`;
 
@@ -108,16 +108,17 @@ export async function getInstance(instanceId: string): Promise<Instance> {
 }
 
 export async function getAllInstances(): Promise<Instance[]> {
+  const paths = await getUserPaths();
   return new Promise((resolve) => {
     const cockpit = getCockpit();
 
     // Ensure the directory exists first
-    // Create instances directory with cockpit-demo-ops group and 775 permissions
-    cockpit.spawn(['bash', '-c', `umask 002 && install -d -g cockpit-demo-ops -m 775 "${INSTANCES_PATH}"`], { err: 'out' })
+    // Create instances directory with proper permissions (umask 002 for group write)
+    cockpit.spawn(['bash', '-c', `umask 002 && install -d -m 775 "${paths.instances}"`], { err: 'out' })
       .then(() => {
         // Use ls command directly as file.list() may not work reliably for directories
         let outputBuffer = '';
-        const lsProcess = cockpit.spawn(['ls', '-1', INSTANCES_PATH], { err: 'out' });
+        const lsProcess = cockpit.spawn(['ls', '-1', paths.instances], { err: 'out' });
 
         lsProcess.stream((data: string) => {
           outputBuffer += data;
@@ -226,7 +227,8 @@ export async function getAllInstances(): Promise<Instance[]> {
 }
 
 export async function deleteInstance(instanceId: string): Promise<void> {
-  const instancePath = `${INSTANCES_PATH}/${instanceId}`;
+  const paths = await getUserPaths();
+  const instancePath = `${paths.instances}/${instanceId}`;
   const unitName = `cockpit-demo-${instanceId}`;
 
   return new Promise((resolve, reject) => {
@@ -258,7 +260,8 @@ export async function updateInstanceStatus(
   instanceId: string,
   updates: Partial<InstanceStatus>
 ): Promise<void> {
-  const statusPath = `${INSTANCES_PATH}/${instanceId}/status.json`;
+  const paths = await getUserPaths();
+  const statusPath = `${paths.instances}/${instanceId}/status.json`;
   const cockpit = getCockpit();
 
   return new Promise((resolve, reject) => {
@@ -297,7 +300,8 @@ export async function updateInstanceStatus(
 }
 
 export async function reapplyInstance(instanceId: string): Promise<void> {
-  const statusPath = `${INSTANCES_PATH}/${instanceId}/status.json`;
+  const paths = await getUserPaths();
+  const statusPath = `${paths.instances}/${instanceId}/status.json`;
 
   const newStatus: InstanceStatus = {
     state: 'pending',
@@ -319,9 +323,11 @@ export async function executeInstance(
   instanceId: string,
   onOutput?: (output: string) => void
 ): Promise<void> {
+  const paths = await getUserPaths();
   const instance = await getInstance(instanceId);
   const config = await loadConfig();
-  const statusPath = `${INSTANCES_PATH}/${instanceId}/status.json`;
+  const statusPath = `${paths.instances}/${instanceId}/status.json`;
+  const statusFile = statusPath; // Pass to meta playbook - container can write directly via mount
 
   if (!config.executionEnvironment) {
     throw new Error('Execution environment is not configured. Please configure it in settings.');
@@ -380,25 +386,46 @@ export async function executeInstance(
     demo_type: instance.spec.demoType,
     demo_path: demoPath,
     demo_vars: instance.spec.parameters,
-    variable_definitions: instance.spec.variable_definitions
+    variable_definitions: instance.spec.variable_definitions,
+    status_file: statusFile
   };
 
   // systemd-run --user doesn't inherit full PATH, so we wrap in bash with explicit PATH
   // This ensures ansible-navigator can be found in common installation locations
-  // Run ansible-navigator from BASE_PATH so it automatically mounts the working directory (collections)
+  // Run ansible-navigator from SHARED_BASE_PATH so it automatically mounts the working directory (collections)
   // ANSIBLE_CONFIG environment variable points to ansible.cfg which configures collections_paths
   // Using absolute paths for meta files located in /usr/share/cockpit-plugin-demos/meta/
   // The ansible.cfg file configures collections_paths to include /var/lib/cockpit-plugin-demos/collections
   // ansible-navigator automatically mounts directories referenced by absolute paths (playbook, config)
-  // Save artifacts to instance directory and disable playbook artifact to avoid permission issues
-  const artifactPath = `${INSTANCES_PATH}/${instanceId}/artifacts`;
+  // Mount per-user instance directory directly into container to avoid copying
+  const artifactPath = paths.artifacts(instanceId);
+  const instanceDir = `${paths.instances}/${instanceId}`;
+
+  // Ensure per-user instance directory exists before mounting
+  await new Promise<void>((resolve, reject) => {
+    cockpit.spawn(['bash', '-c', `umask 002 && install -d -m 775 "${instanceDir}"`], { err: 'out' })
+      .then(() => {
+        return cockpit.spawn(['bash', '-c', `umask 002 && install -d -m 775 "${artifactPath}"`], { err: 'out' });
+      })
+      .then(() => resolve())
+      .catch((error: any) => {
+        reject(new Error(`Failed to create instance directory: ${error.message}`));
+      });
+  });
+
+  // Mount the per-user instance directory into the container
+  // ansible-navigator uses podman/docker under the hood and supports volume mounts via --eev
+  // Format: source:destination:options (rw = read-write, Z = SELinux relabel for podman)
+  // Options must be comma-separated: rw,Z not rwZ
+  const volumeMount = `${instanceDir}:${instanceDir}:rw,Z`;
+
   const ansibleNavigatorCmd = [
     'bash', '-c',
     `export PATH="/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin:$HOME/.local/bin:$PATH" && ` +
     `export ANSIBLE_CONFIG="/usr/share/cockpit-plugin-demos/meta/ansible.cfg" && ` +
-    `mkdir -p "${artifactPath}" && ` +
     `ansible-navigator run "/usr/share/cockpit-plugin-demos/meta/meta_playbook.yml" ` +
     `--eei "${config.executionEnvironment}" ` +
+    `--eev "${volumeMount}" ` +
     `--extra-vars '${JSON.stringify(extraVars)}' ` +
     `--mode stdout ` +
     `--pull-policy missing ` +
@@ -411,7 +438,7 @@ export async function executeInstance(
     'systemd-run',
     '--user',
     '--unit', `cockpit-demo-${instanceId}`,
-    '--working-directory', BASE_PATH,
+    '--working-directory', SHARED_BASE_PATH,
     '--collect',
     '--wait',
     '--',
@@ -467,6 +494,7 @@ export async function executeInstance(
       };
 
       try {
+        // Read status file directly from per-user location (mounted in container)
         const statusContent = await cockpit.file(statusPath).read();
         const playbookStatus = JSON.parse(statusContent);
         if (playbookStatus.summary) {
@@ -488,6 +516,7 @@ export async function executeInstance(
       // (e.g., systemd-run may return non-zero for other reasons)
       let artifactStatus: string | null = null;
       try {
+        // Read artifacts directly from per-user location (mounted in container)
         const artifactFiles = await cockpit.spawn(['find', artifactPath, '-name', '*-artifact-*.json', '-type', 'f', '-printf', '%T@ %p\\n']);
         const latestArtifact = artifactFiles.trim().split('\n')
           .sort((a: string, b: string) => parseFloat(b.split(' ')[0]) - parseFloat(a.split(' ')[0]))[0]
@@ -590,8 +619,9 @@ export interface AnsibleArtifact {
 }
 
 export async function getInstanceArtifact(instanceId: string): Promise<AnsibleArtifact | null> {
+  const paths = await getUserPaths();
   const cockpit = getCockpit();
-  const artifactPath = `${INSTANCES_PATH}/${instanceId}/artifacts`;
+  const artifactPath = paths.artifacts(instanceId);
 
   try {
     // Find the most recent artifact file
@@ -609,6 +639,45 @@ export async function getInstanceArtifact(instanceId: string): Promise<AnsibleAr
     return artifact;
   } catch (error: any) {
     console.error('Failed to read ansible-navigator artifact:', error);
+    return null;
+  }
+}
+
+export async function getInstanceArtifactRaw(instanceId: string): Promise<string | null> {
+  const paths = await getUserPaths();
+  const cockpit = getCockpit();
+  const artifactPath = paths.artifacts(instanceId);
+
+  try {
+    // Find the most recent artifact file
+    const artifactFiles = await cockpit.spawn(['find', artifactPath, '-name', '*-artifact-*.json', '-type', 'f', '-printf', '%T@ %p\\n']);
+    const latestArtifact = artifactFiles.trim().split('\n')
+      .sort((a: string, b: string) => parseFloat(b.split(' ')[0]) - parseFloat(a.split(' ')[0]))[0]
+      ?.split(' ')[1];
+
+    if (!latestArtifact) {
+      return null;
+    }
+
+    const artifactContent = await cockpit.file(latestArtifact).read();
+    return artifactContent;
+  } catch (error: any) {
+    console.error('Failed to read ansible-navigator artifact:', error);
+    return null;
+  }
+}
+
+export async function getInstanceNavigatorLog(instanceId: string): Promise<string | null> {
+  const paths = await getUserPaths();
+  const cockpit = getCockpit();
+  const artifactPath = paths.artifacts(instanceId);
+  const logPath = `${artifactPath}/ansible-navigator.log`;
+
+  try {
+    const logContent = await cockpit.file(logPath).read();
+    return logContent;
+  } catch (error: any) {
+    console.error('Failed to read ansible-navigator log:', error);
     return null;
   }
 }
